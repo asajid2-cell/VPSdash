@@ -76,6 +76,7 @@ def public_key_candidates() -> list[dict[str, str]]:
         entries.append(
             {
                 "path": resolved,
+                "private_key_path": resolved[:-4] if resolved.lower().endswith(".pub") else resolved,
                 "label": path.name,
                 "public_key": value,
             }

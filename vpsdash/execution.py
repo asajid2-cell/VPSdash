@@ -102,6 +102,42 @@ def _bash_path_argument(path: str) -> str:
     return shlex.quote(normalized)
 
 
+def _windows_path_to_wsl_path(path: str) -> str:
+    raw = str(path or "").strip().replace("\\", "/")
+    if not raw:
+        return ""
+    drive_match = re.match(r"^([A-Za-z]):/(.*)$", raw)
+    if drive_match:
+        drive = drive_match.group(1).lower()
+        rest = drive_match.group(2)
+        return f"/mnt/{drive}/{rest}"
+    return raw
+
+
+def _ssh_inner_command(bootstrap_user: str, primary_ip: str, *, private_key_path: str = "") -> str:
+    if private_key_path:
+        safe_key = shlex.quote(private_key_path)
+        user_host = shlex.quote(f"{bootstrap_user}@{primary_ip}")
+        return (
+            f'tmp_key="$(mktemp /tmp/vpsdash-key-XXXXXX)" && '
+            f'cp {safe_key} "$tmp_key" && chmod 600 "$tmp_key" && '
+            f'trap \'rm -f "$tmp_key"\' EXIT && '
+            f'ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=12 '
+            f'-o IdentitiesOnly=yes -i "$tmp_key" {user_host}'
+        )
+    parts = [
+        "ssh",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
+        "ConnectTimeout=12",
+    ]
+    if private_key_path:
+        parts.extend(["-o", "IdentitiesOnly=yes", "-i", private_key_path])
+    parts.append(f"{bootstrap_user}@{primary_ip}")
+    return " ".join(shlex.quote(part) for part in parts)
+
+
 def _wrap_root_shell_command(command: str) -> str:
     return f"sudo -n bash -lc {shlex.quote(command)}"
 
@@ -283,6 +319,7 @@ def describe_doplet_terminal(host: dict[str, Any], doplet: dict[str, Any]) -> di
     status = str(doplet.get("status") or "draft").strip().lower()
     distro = str(host.get("wsl_distribution") or "Ubuntu").strip() or "Ubuntu"
     bootstrap_user = str(doplet.get("bootstrap_user") or "ubuntu").strip() or "ubuntu"
+    metadata = dict(doplet.get("metadata_json") or {})
     ip_addresses = [str(item).strip() for item in doplet.get("ip_addresses") or [] if str(item).strip()]
     if not ip_addresses and status not in {"draft", "planned", "deleted"}:
         try:
@@ -334,8 +371,12 @@ def describe_doplet_terminal(host: dict[str, Any], doplet: dict[str, Any]) -> di
         }
 
     if host_mode in WINDOWS_LOCAL_MODES:
+        local_private_key_path = _windows_path_to_wsl_path(str(metadata.get("local_private_key_path") or "").strip())
+        access_note = ""
+        if primary_ip.startswith("192.168.122.") or primary_ip.startswith("192.168.124."):
+            access_note = "This guest IP is on the WSL/libvirt network. Use Open Terminal or the copied WSL command instead of native Windows PowerShell SSH."
         if primary_ip:
-            inner_command = f"ssh -o StrictHostKeyChecking=accept-new {bootstrap_user}@{primary_ip}"
+            inner_command = _ssh_inner_command(bootstrap_user, primary_ip, private_key_path=local_private_key_path)
             preview_command = build_wsl_command(host, inner_command)
             return {
                 "supported": True,
@@ -350,6 +391,7 @@ def describe_doplet_terminal(host: dict[str, Any], doplet: dict[str, Any]) -> di
                 "reason": "",
                 "inner_command": inner_command,
                 "access_label": f"SSH {bootstrap_user}@{primary_ip}",
+                "access_note": access_note,
                 "status": status,
             }
         inner_command = f"virsh console {slug}"
@@ -368,6 +410,7 @@ def describe_doplet_terminal(host: dict[str, Any], doplet: dict[str, Any]) -> di
             "inner_command": inner_command,
             "requires_root": True,
             "access_label": f"Console {slug} via local WSL",
+            "access_note": "No guest IP has been detected yet. Open the serial console until cloud-init networking and SSH are ready.",
             "status": status,
         }
 

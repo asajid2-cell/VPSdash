@@ -348,6 +348,16 @@ class DesktopTests(unittest.TestCase):
     def test_native_doplet_payload_respects_selected_login_method(self) -> None:
         window = VpsDashWindow(VpsDashService(self.root))
         try:
+            window.local_machine = {
+                "ssh_public_keys": [
+                    {
+                        "label": "id_ed25519.pub",
+                        "path": r"C:/Users/tester/.ssh/id_ed25519.pub",
+                        "private_key_path": r"C:/Users/tester/.ssh/id_ed25519",
+                        "public_key": "ssh-ed25519 AAAATESTKEY tester@machine",
+                    }
+                ]
+            }
             window.native_doplet_name.setText("Secure Box")
             window.native_doplet_slug.setText("secure-box")
             window.native_doplet_bootstrap_user.setText("ubuntu")
@@ -370,6 +380,7 @@ class DesktopTests(unittest.TestCase):
             self.assertEqual(ssh_payload["bootstrap_password"], "")
             self.assertEqual(ssh_payload["ssh_public_keys"], ["ssh-ed25519 AAAATESTKEY tester@machine"])
             self.assertEqual(ssh_payload["metadata_json"]["auth_mode"], "ssh")
+            self.assertEqual(ssh_payload["metadata_json"]["local_private_key_path"], "C:/Users/tester/.ssh/id_ed25519")
 
             window.native_doplet_auth_mode.setCurrentIndex(both_index)
             window.native_doplet_bootstrap_password.setText("super-secret")
@@ -377,6 +388,7 @@ class DesktopTests(unittest.TestCase):
             self.assertEqual(both_payload["bootstrap_password"], "super-secret")
             self.assertEqual(both_payload["ssh_public_keys"], ["ssh-ed25519 AAAATESTKEY tester@machine"])
             self.assertEqual(both_payload["metadata_json"]["auth_mode"], "password+ssh")
+            self.assertEqual(both_payload["metadata_json"]["local_private_key_path"], "C:/Users/tester/.ssh/id_ed25519")
         finally:
             window.close()
 

@@ -1038,6 +1038,10 @@ class VpsDashWindow(QMainWindow):
         self._register_responsive_box(local_actions, breakpoint=1180)
         self.resources_open_terminal_button = make_button("Open Terminal", "secondary")
         self.resources_open_terminal_button.clicked.connect(self._open_selected_resources_doplet_terminal)
+        self.resources_show_ips_button = make_button("Show IPs", "ghost")
+        self.resources_show_ips_button.clicked.connect(self._show_selected_resources_doplet_ips)
+        self.resources_copy_ips_button = make_button("Copy IPs", "ghost")
+        self.resources_copy_ips_button.clicked.connect(self._copy_selected_resources_doplet_ips)
         self.resources_copy_terminal_button = make_button("Copy Terminal", "ghost")
         self.resources_copy_terminal_button.clicked.connect(self._copy_selected_resources_doplet_terminal)
         self.resources_start_button = make_button("Start", "ghost")
@@ -1049,6 +1053,8 @@ class VpsDashWindow(QMainWindow):
         self.task_buttons.extend(
             [
                 self.resources_open_terminal_button,
+                self.resources_show_ips_button,
+                self.resources_copy_ips_button,
                 self.resources_copy_terminal_button,
                 self.resources_start_button,
                 self.resources_shutdown_button,
@@ -1056,6 +1062,8 @@ class VpsDashWindow(QMainWindow):
             ]
         )
         local_actions.addWidget(self.resources_open_terminal_button)
+        local_actions.addWidget(self.resources_show_ips_button)
+        local_actions.addWidget(self.resources_copy_ips_button)
         local_actions.addWidget(self.resources_copy_terminal_button)
         local_actions.addWidget(self.resources_start_button)
         local_actions.addWidget(self.resources_shutdown_button)
@@ -1315,6 +1323,10 @@ class VpsDashWindow(QMainWindow):
         self.native_save_doplet_button.clicked.connect(self._save_native_doplet)
         self.native_create_doplet_button = make_button("Create VPS", "primary")
         self.native_create_doplet_button.clicked.connect(self._create_native_doplet)
+        self.native_show_ips_button = make_button("Show IPs", "ghost")
+        self.native_show_ips_button.clicked.connect(self._show_selected_native_doplet_ips)
+        self.native_copy_ips_button = make_button("Copy IPs", "ghost")
+        self.native_copy_ips_button.clicked.connect(self._copy_selected_native_doplet_ips)
         self.native_open_terminal_button = make_button("Open Terminal", "ghost")
         self.native_open_terminal_button.clicked.connect(self._open_selected_native_doplet_terminal)
         self.native_copy_terminal_button = make_button("Copy Terminal Command", "ghost")
@@ -1323,12 +1335,16 @@ class VpsDashWindow(QMainWindow):
             [
                 self.native_save_doplet_button,
                 self.native_create_doplet_button,
+                self.native_show_ips_button,
+                self.native_copy_ips_button,
                 self.native_open_terminal_button,
                 self.native_copy_terminal_button,
             ]
         )
         native_builder_actions.addWidget(self.native_save_doplet_button)
         native_builder_actions.addWidget(self.native_create_doplet_button)
+        native_builder_actions.addWidget(self.native_show_ips_button)
+        native_builder_actions.addWidget(self.native_copy_ips_button)
         native_builder_actions.addWidget(self.native_open_terminal_button)
         native_builder_actions.addWidget(self.native_copy_terminal_button)
         native_builder_actions.addStretch(1)
@@ -1987,6 +2003,10 @@ class VpsDashWindow(QMainWindow):
         self._register_responsive_box(doplet_actions, breakpoint=1080)
         self.native_manage_open_button = make_button("Open Terminal", "secondary")
         self.native_manage_open_button.clicked.connect(self._open_selected_native_doplet_terminal)
+        self.native_manage_show_ips_button = make_button("Show IPs", "ghost")
+        self.native_manage_show_ips_button.clicked.connect(self._show_selected_native_doplet_ips)
+        self.native_manage_copy_ips_button = make_button("Copy IPs", "ghost")
+        self.native_manage_copy_ips_button.clicked.connect(self._copy_selected_native_doplet_ips)
         self.native_manage_copy_button = make_button("Copy Terminal", "ghost")
         self.native_manage_copy_button.clicked.connect(self._copy_selected_native_doplet_terminal)
         self.native_manage_start_button = make_button("Start", "ghost")
@@ -1998,6 +2018,8 @@ class VpsDashWindow(QMainWindow):
         self.task_buttons.extend(
             [
                 self.native_manage_open_button,
+                self.native_manage_show_ips_button,
+                self.native_manage_copy_ips_button,
                 self.native_manage_copy_button,
                 self.native_manage_start_button,
                 self.native_manage_shutdown_button,
@@ -2005,6 +2027,8 @@ class VpsDashWindow(QMainWindow):
             ]
         )
         doplet_actions.addWidget(self.native_manage_open_button)
+        doplet_actions.addWidget(self.native_manage_show_ips_button)
+        doplet_actions.addWidget(self.native_manage_copy_ips_button)
         doplet_actions.addWidget(self.native_manage_copy_button)
         doplet_actions.addWidget(self.native_manage_start_button)
         doplet_actions.addWidget(self.native_manage_shutdown_button)
@@ -3090,6 +3114,7 @@ class VpsDashWindow(QMainWindow):
                 "target": terminal.get("target") or "",
                 "ips": terminal.get("ip_addresses") or doplet.get("ip_addresses", []),
                 "command": terminal.get("preview_command") or "",
+                "note": terminal.get("access_note") or "",
                 "reason": terminal.get("reason") or "",
             },
         }
@@ -3142,6 +3167,7 @@ class VpsDashWindow(QMainWindow):
                 "target": terminal.get("target") or "",
                 "ips": terminal.get("ip_addresses") or doplet.get("ip_addresses", []),
                 "command": terminal.get("preview_command") or "",
+                "note": terminal.get("access_note") or "",
                 "reason": terminal.get("reason") or "",
             },
         }
@@ -3183,6 +3209,10 @@ class VpsDashWindow(QMainWindow):
         include_keys = auth_mode in {"ssh", "password+ssh"}
         keys = [line.strip() for line in self.native_doplet_keys.toPlainText().splitlines() if line.strip()] if include_keys else []
         bootstrap_password = self.native_doplet_bootstrap_password.text().strip() if include_password else ""
+        metadata_json: dict[str, Any] = {"auth_mode": auth_mode}
+        local_private_key_path = self._matching_local_private_key_path(keys)
+        if local_private_key_path:
+            metadata_json["local_private_key_path"] = local_private_key_path
         payload: dict[str, Any] = {
             "id": self.current_native_doplet_id,
             "name": self.native_doplet_name.text().strip() or "New Doplet",
@@ -3198,12 +3228,27 @@ class VpsDashWindow(QMainWindow):
             "bootstrap_user": self.native_doplet_bootstrap_user.text().strip() or "ubuntu",
             "bootstrap_password": bootstrap_password,
             "ssh_public_keys": keys,
-            "metadata_json": {"auth_mode": auth_mode},
+            "metadata_json": metadata_json,
             "status": "draft",
         }
         if payload["primary_network_id"] in {"", None}:
             payload.pop("primary_network_id")
         return payload
+
+    def _matching_local_private_key_path(self, keys: list[str]) -> str:
+        normalized = {str(item or "").strip() for item in keys if str(item or "").strip()}
+        if not normalized:
+            return ""
+        for entry in (self.local_machine or {}).get("ssh_public_keys") or []:
+            public_key = str(entry.get("public_key") or "").strip()
+            if public_key and public_key in normalized:
+                private_key_path = str(entry.get("private_key_path") or "").strip()
+                if private_key_path:
+                    return private_key_path
+                public_key_path = str(entry.get("path") or "").strip()
+                if public_key_path.lower().endswith(".pub"):
+                    return public_key_path[:-4]
+        return ""
 
     def _doplet_auth_mode(self, doplet: dict[str, Any]) -> str:
         metadata = dict(doplet.get("metadata_json") or {})
@@ -3254,6 +3299,41 @@ class VpsDashWindow(QMainWindow):
             raise ValueError(str(terminal.get("reason") or "Terminal is not available yet."))
         return str(terminal.get("preview_command") or "")
 
+    def _ip_text_for_doplet(self, doplet_id: int) -> tuple[str, dict[str, Any]]:
+        details = self.service.describe_doplet_terminal(doplet_id)
+        ips = [str(item).strip() for item in details.get("ip_addresses") or [] if str(item).strip()]
+        if not ips:
+            raise ValueError(str(details.get("reason") or "No guest IP has been detected yet."))
+        note = str(details.get("access_note") or "").strip()
+        ip_text = "\n".join(ips)
+        if note:
+            ip_text = f"{ip_text}\n\n{note}"
+        return ip_text, details
+
+    def _show_selected_native_doplet_ips(self) -> None:
+        doplet_id = self._selected_native_doplet_id()
+        if not doplet_id:
+            self._set_status("Choose a Doplet first", 3000)
+            return
+        try:
+            ip_text, details = self._ip_text_for_doplet(doplet_id)
+            QMessageBox.information(self, "Doplet IPs", ip_text)
+            self._set_status(f"Showing IPs for {details.get('access_label') or 'selected Doplet'}", 4000)
+        except Exception as exc:
+            self._show_error("Show IPs failed", str(exc), traceback.format_exc())
+
+    def _copy_selected_native_doplet_ips(self) -> None:
+        doplet_id = self._selected_native_doplet_id()
+        if not doplet_id:
+            self._set_status("Choose a Doplet first", 3000)
+            return
+        try:
+            ip_text, _details = self._ip_text_for_doplet(doplet_id)
+            QApplication.clipboard().setText(ip_text)
+            self._set_status("Doplet IPs copied", 4000)
+        except Exception as exc:
+            self._show_error("Copy IPs failed", str(exc), traceback.format_exc())
+
     def _open_selected_native_doplet_terminal(self) -> None:
         doplet_id = self._selected_native_doplet_id()
         if not doplet_id:
@@ -3288,6 +3368,30 @@ class VpsDashWindow(QMainWindow):
         if not terminal.get("supported"):
             raise ValueError(str(terminal.get("reason") or "Terminal is not available yet."))
         return str(terminal.get("preview_command") or "")
+
+    def _show_selected_resources_doplet_ips(self) -> None:
+        doplet_id = self._selected_resources_doplet_id()
+        if not doplet_id:
+            self._set_status("Choose a local Doplet first", 3000)
+            return
+        try:
+            ip_text, details = self._ip_text_for_doplet(doplet_id)
+            QMessageBox.information(self, "Doplet IPs", ip_text)
+            self._set_status(f"Showing IPs for {details.get('access_label') or 'selected Doplet'}", 4000)
+        except Exception as exc:
+            self._show_error("Show IPs failed", str(exc), traceback.format_exc())
+
+    def _copy_selected_resources_doplet_ips(self) -> None:
+        doplet_id = self._selected_resources_doplet_id()
+        if not doplet_id:
+            self._set_status("Choose a local Doplet first", 3000)
+            return
+        try:
+            ip_text, _details = self._ip_text_for_doplet(doplet_id)
+            QApplication.clipboard().setText(ip_text)
+            self._set_status("Doplet IPs copied", 4000)
+        except Exception as exc:
+            self._show_error("Copy IPs failed", str(exc), traceback.format_exc())
 
     def _open_selected_resources_doplet_terminal(self) -> None:
         doplet_id = self._selected_resources_doplet_id()
