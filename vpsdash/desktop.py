@@ -20,6 +20,8 @@ from PySide6.QtWidgets import (
     QBoxLayout,
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFormLayout,
     QFrame,
     QGridLayout,
@@ -1051,6 +1053,10 @@ class VpsDashWindow(QMainWindow):
         self.resources_copy_terminal_button.clicked.connect(self._copy_selected_resources_doplet_terminal)
         self.resources_start_button = make_button("Start", "ghost")
         self.resources_start_button.clicked.connect(lambda: self._queue_resources_doplet_lifecycle("start"))
+        self.resources_resize_button = make_button("Resize VPS", "ghost")
+        self.resources_resize_button.clicked.connect(self._resize_selected_resources_doplet)
+        self.resources_reprovision_button = make_button("Reprovision VPS", "ghost")
+        self.resources_reprovision_button.clicked.connect(self._reprovision_selected_resources_doplet)
         self.resources_shutdown_button = make_button("Shutdown", "ghost")
         self.resources_shutdown_button.clicked.connect(lambda: self._queue_resources_doplet_lifecycle("shutdown"))
         self.resources_delete_button = make_button("Delete VPS", "ghost")
@@ -1062,6 +1068,8 @@ class VpsDashWindow(QMainWindow):
                 self.resources_copy_ips_button,
                 self.resources_copy_terminal_button,
                 self.resources_start_button,
+                self.resources_resize_button,
+                self.resources_reprovision_button,
                 self.resources_shutdown_button,
                 self.resources_delete_button,
             ]
@@ -1071,6 +1079,8 @@ class VpsDashWindow(QMainWindow):
         local_actions.addWidget(self.resources_copy_ips_button)
         local_actions.addWidget(self.resources_copy_terminal_button)
         local_actions.addWidget(self.resources_start_button)
+        local_actions.addWidget(self.resources_resize_button)
+        local_actions.addWidget(self.resources_reprovision_button)
         local_actions.addWidget(self.resources_shutdown_button)
         local_actions.addWidget(self.resources_delete_button)
         local_actions.addStretch(1)
@@ -2016,6 +2026,10 @@ class VpsDashWindow(QMainWindow):
         self.native_manage_copy_button.clicked.connect(self._copy_selected_native_doplet_terminal)
         self.native_manage_start_button = make_button("Start", "ghost")
         self.native_manage_start_button.clicked.connect(lambda: self._queue_native_doplet_lifecycle("start"))
+        self.native_manage_resize_button = make_button("Resize VPS", "ghost")
+        self.native_manage_resize_button.clicked.connect(self._resize_selected_native_doplet)
+        self.native_manage_reprovision_button = make_button("Reprovision VPS", "ghost")
+        self.native_manage_reprovision_button.clicked.connect(self._reprovision_selected_native_doplet)
         self.native_manage_shutdown_button = make_button("Shutdown", "ghost")
         self.native_manage_shutdown_button.clicked.connect(lambda: self._queue_native_doplet_lifecycle("shutdown"))
         self.native_manage_delete_button = make_button("Delete VPS", "ghost")
@@ -2027,6 +2041,8 @@ class VpsDashWindow(QMainWindow):
                 self.native_manage_copy_ips_button,
                 self.native_manage_copy_button,
                 self.native_manage_start_button,
+                self.native_manage_resize_button,
+                self.native_manage_reprovision_button,
                 self.native_manage_shutdown_button,
                 self.native_manage_delete_button,
             ]
@@ -2036,6 +2052,8 @@ class VpsDashWindow(QMainWindow):
         doplet_actions.addWidget(self.native_manage_copy_ips_button)
         doplet_actions.addWidget(self.native_manage_copy_button)
         doplet_actions.addWidget(self.native_manage_start_button)
+        doplet_actions.addWidget(self.native_manage_resize_button)
+        doplet_actions.addWidget(self.native_manage_reprovision_button)
         doplet_actions.addWidget(self.native_manage_shutdown_button)
         doplet_actions.addWidget(self.native_manage_delete_button)
         doplet_actions.addStretch(1)
@@ -3159,6 +3177,74 @@ class VpsDashWindow(QMainWindow):
                     return int(host_id)
         return None
 
+    def _doplet_by_id(self, doplet_id: int, *, local_only: bool = False) -> dict[str, Any] | None:
+        source = self._local_control_plane_doplets() if local_only else self._control_plane_doplets()
+        return next((item for item in source if int(item.get("id", 0)) == int(doplet_id)), None)
+
+    def _prompt_resize_spec(self, doplet: dict[str, Any]) -> dict[str, int] | None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Resize VPS {doplet.get('name', 'Doplet')}")
+        dialog.setModal(True)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+        layout.addWidget(
+            make_wrap_label(
+                "Choose the new VPS size. This updates the Doplet allocation and queues a real resize task on the selected host.",
+                css_class="CardBody",
+            )
+        )
+        form = QFormLayout()
+        form.setSpacing(12)
+        vcpu = QSpinBox(dialog)
+        vcpu.setRange(1, 256)
+        vcpu.setValue(int(doplet.get("vcpu") or 1))
+        ram_mb = QSpinBox(dialog)
+        ram_mb.setRange(256, 1048576)
+        ram_mb.setSingleStep(256)
+        ram_mb.setValue(int(doplet.get("ram_mb") or 1024))
+        disk_gb = QSpinBox(dialog)
+        disk_gb.setRange(1, 65536)
+        disk_gb.setValue(int(doplet.get("disk_gb") or 20))
+        form.addRow("vCPU", vcpu)
+        form.addRow("RAM (MB)", ram_mb)
+        form.addRow("Disk (GB)", disk_gb)
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.Accepted:
+            return None
+        return {
+            "vcpu": int(vcpu.value()),
+            "ram_mb": int(ram_mb.value()),
+            "disk_gb": int(disk_gb.value()),
+        }
+
+    def _reprovision_payload_for_doplet(self, doplet: dict[str, Any]) -> dict[str, Any]:
+        metadata = dict(doplet.get("metadata_json") or {})
+        return {
+            "id": doplet.get("id"),
+            "name": doplet.get("name"),
+            "slug": doplet.get("slug"),
+            "host_id": doplet.get("host_id"),
+            "image_id": doplet.get("image_id"),
+            "flavor_id": doplet.get("flavor_id"),
+            "primary_network_id": doplet.get("primary_network_id"),
+            "network_ids": list(doplet.get("network_ids") or []),
+            "vcpu": int(doplet.get("vcpu") or 1),
+            "ram_mb": int(doplet.get("ram_mb") or 1024),
+            "disk_gb": int(doplet.get("disk_gb") or 20),
+            "storage_backend": doplet.get("storage_backend") or "files",
+            "bootstrap_user": doplet.get("bootstrap_user") or "ubuntu",
+            "bootstrap_password": str(metadata.get("bootstrap_password") or "").strip(),
+            "ssh_public_keys": list(doplet.get("ssh_public_keys") or []),
+            "gpu_assignments": list(doplet.get("gpu_assignments") or []),
+            "metadata_json": metadata,
+            "status": "draft",
+        }
+
     def _native_host_changed(self, *_args: Any) -> None:
         host = next((item for item in self._control_plane_hosts() if int(item.get("id", 0)) == int(self.native_doplet_host.currentData() or 0)), None)
         backend = str((host or {}).get("primary_storage_backend") or "files")
@@ -3577,6 +3663,64 @@ class VpsDashWindow(QMainWindow):
             return
         self._delete_doplet_with_confirmation(resource_id, doplet)
 
+    def _resize_selected_resources_doplet(self) -> None:
+        doplet_id = self._selected_resources_doplet_id()
+        if not doplet_id:
+            self._set_status("Choose a local Doplet first", 3000)
+            return
+        doplet = self._doplet_by_id(doplet_id, local_only=True)
+        if not doplet:
+            self._set_status("Selected Doplet is no longer available", 4000)
+            return
+        resize_payload = self._prompt_resize_spec(doplet)
+        if not resize_payload:
+            return
+        self._run_async_task(
+            start_message=f"Resizing VPS {doplet.get('name', '')}...",
+            work=lambda: self._launch_queued_platform_task(
+                lambda: self.service.queue_doplet_resize(doplet_id, resize_payload, actor="desktop"),
+                actor="desktop",
+            ),
+            on_success=lambda result: (self._watch_platform_task(int((result or {}).get("task_id", 0))), self._load_bootstrap()),
+            error_title="Resize VPS failed",
+            done_message="Resize started",
+        )
+
+    def _reprovision_selected_resources_doplet(self) -> None:
+        doplet_id = self._selected_resources_doplet_id()
+        if not doplet_id:
+            self._set_status("Choose a local Doplet first", 3000)
+            return
+        doplet = self._doplet_by_id(doplet_id, local_only=True)
+        if not doplet:
+            self._set_status("Selected Doplet is no longer available", 4000)
+            return
+        if QMessageBox.warning(
+            self,
+            "Reprovision VPS",
+            (
+                f"Reprovision VPS {doplet.get('name', 'Doplet')}?\n\n"
+                "This will rebuild the VPS from the saved Doplet spec and can destroy runtime data that is not backed up."
+            ),
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        ) != QMessageBox.Yes:
+            return
+        reprovision_payload = self._reprovision_payload_for_doplet(doplet)
+        self._run_async_task(
+            start_message=f"Reprovisioning VPS {doplet.get('name', '')}...",
+            work=lambda: self._launch_queued_platform_task(
+                lambda: self.service.queue_doplet_create(
+                    int(self.service.upsert_doplet(reprovision_payload, actor="desktop")["id"]),
+                    actor="desktop",
+                ),
+                actor="desktop",
+            ),
+            on_success=lambda result: (self._watch_platform_task(int((result or {}).get("task_id", 0))), self._load_bootstrap()),
+            error_title="Reprovision VPS failed",
+            done_message="Reprovision started",
+        )
+
     def _capture_selected_or_local_platform_host_inventory(self) -> None:
         host_id = self._selected_platform_host_id()
         if not host_id:
@@ -3607,6 +3751,64 @@ class VpsDashWindow(QMainWindow):
             on_success=lambda result: (self._watch_platform_task(int((result or {}).get("task_id", 0))), self._load_bootstrap()),
             error_title=f"{action.title()} Doplet failed",
             done_message=f"{action.title()} started",
+        )
+
+    def _resize_selected_native_doplet(self) -> None:
+        doplet_id = self._selected_native_doplet_id()
+        if not doplet_id:
+            self._set_status("Choose a Doplet first", 3000)
+            return
+        doplet = self._doplet_by_id(doplet_id)
+        if not doplet:
+            self._set_status("Selected Doplet is no longer available", 4000)
+            return
+        resize_payload = self._prompt_resize_spec(doplet)
+        if not resize_payload:
+            return
+        self._run_async_task(
+            start_message=f"Resizing VPS {doplet.get('name', '')}...",
+            work=lambda: self._launch_queued_platform_task(
+                lambda: self.service.queue_doplet_resize(doplet_id, resize_payload, actor="desktop"),
+                actor="desktop",
+            ),
+            on_success=lambda result: (self._watch_platform_task(int((result or {}).get("task_id", 0))), self._load_bootstrap()),
+            error_title="Resize VPS failed",
+            done_message="Resize started",
+        )
+
+    def _reprovision_selected_native_doplet(self) -> None:
+        doplet_id = self._selected_native_doplet_id()
+        if not doplet_id:
+            self._set_status("Choose a Doplet first", 3000)
+            return
+        doplet = self._doplet_by_id(doplet_id)
+        if not doplet:
+            self._set_status("Selected Doplet is no longer available", 4000)
+            return
+        if QMessageBox.warning(
+            self,
+            "Reprovision VPS",
+            (
+                f"Reprovision VPS {doplet.get('name', 'Doplet')}?\n\n"
+                "This will rebuild the VPS from the saved Doplet spec and can destroy runtime data that is not backed up."
+            ),
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        ) != QMessageBox.Yes:
+            return
+        reprovision_payload = self._reprovision_payload_for_doplet(doplet)
+        self._run_async_task(
+            start_message=f"Reprovisioning VPS {doplet.get('name', '')}...",
+            work=lambda: self._launch_queued_platform_task(
+                lambda: self.service.queue_doplet_create(
+                    int(self.service.upsert_doplet(reprovision_payload, actor="desktop")["id"]),
+                    actor="desktop",
+                ),
+                actor="desktop",
+            ),
+            on_success=lambda result: (self._watch_platform_task(int((result or {}).get("task_id", 0))), self._load_bootstrap()),
+            error_title="Reprovision VPS failed",
+            done_message="Reprovision started",
         )
 
     def _delete_selected_native_doplet(self) -> None:
