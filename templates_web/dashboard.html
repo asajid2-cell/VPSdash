@@ -1,0 +1,511 @@
+﻿{% extends "base.html" %}
+{% block content %}
+  <section class="hero card workspace-panel" id="overview">
+    <div class="hero-copy">
+      <div class="eyebrow">Native Hypervisor Workflow</div>
+      <h1>Prepare a host, size a Doplet, and operate the stack from one command surface.</h1>
+      <p>
+        VPSdash keeps host setup, WSL-backed Windows nodes, Linux hypervisors, Doplet sizing,
+        network isolation, storage backends, backups, and task execution in one place. The layout is
+        organized around the actual operator path instead of scattered setup pages.
+      </p>
+      <div class="hero-meta">
+        <span class="chip">Linux + Windows via WSL</span>
+        <span class="chip success">Basic VPS first</span>
+        <span class="chip warn">LAN/VPN first</span>
+      </div>
+    </div>
+    <div class="hero-actions">
+      <a class="button-link" href="#hosts-panel">Open Host Admin</a>
+      <a class="button-link" href="#doplets-panel">Open VPS Builder</a>
+      <a class="button-link" href="#manage-doplets-panel">Manage Doplets</a>
+      <button id="refresh-bootstrap" class="secondary" type="button">Refresh</button>
+    </div>
+  </section>
+
+  <section class="metric-grid" id="metric-grid"></section>
+
+  <div id="flash" class="flash hidden"></div>
+
+  <div class="workspace-divider"><span>Provisioning</span></div>
+  <section class="two-up">
+    <div class="card workspace-panel" id="hosts-panel">
+      <div class="section-header">
+        <div>
+          <div class="eyebrow">Host Workspace</div>
+          <h2>1. Prepare a host</h2>
+          <p class="workspace-copy">Choose the machine that will run VPSes, save it once, and prepare the hypervisor. For the first working flow, use Files / qcow2 and skip the advanced storage options.</p>
+        </div>
+        <button id="clear-host-form" class="secondary" type="button">New Host</button>
+      </div>
+
+      <div class="stack-form">
+        <div class="field-grid compact-grid">
+          <div class="support-card">
+            <div class="eyebrow">Detected machine</div>
+            <div id="host-local-info" class="muted">Use this machine to prefill host identity, WSL defaults, and reachable SSH targets.</div>
+          </div>
+          <div class="support-card">
+            <div class="eyebrow">SSH access</div>
+            <div id="host-ssh-readout" class="muted">Save or prefill a host to generate the recommended SSH target and command.</div>
+          </div>
+        </div>
+
+        <div class="button-row compact">
+          <button id="fill-local-windows-host" class="secondary" type="button">Use This Windows PC</button>
+          <button id="fill-local-linux-host" class="secondary" type="button">Use This Linux PC</button>
+          <button id="fill-this-machine-ssh" class="secondary" type="button">Use This Machine As SSH Target</button>
+          <button id="copy-ssh-target" class="secondary" type="button">Copy SSH Target</button>
+          <button id="copy-ssh-command" class="secondary" type="button">Copy SSH Command</button>
+        </div>
+      </div>
+
+      <form id="host-form" class="stack-form">
+        <input type="hidden" name="id">
+        <div class="field-grid">
+          <label><span>Name</span><input name="name" placeholder="Hypervisor A"></label>
+          <label><span>Slug</span><input name="slug" placeholder="hypervisor-a"></label>
+          <label>
+            <span>Mode</span>
+            <select name="host_mode">
+              <option value="windows-local">Windows host via local WSL</option>
+              <option value="linux-local">Local Linux</option>
+              <option value="linux-hypervisor">Linux Hypervisor</option>
+              <option value="remote-linux">Remote Linux</option>
+              <option value="windows-remote">Remote Windows host via SSH + WSL</option>
+            </select>
+          </label>
+          <label>
+            <span>Distro</span>
+            <select name="distro">
+              <option value="ubuntu-server-lts">Ubuntu Server LTS</option>
+              <option value="debian-stable">Debian Stable</option>
+            </select>
+          </label>
+          <label>
+            <span>Storage backend</span>
+            <select name="primary_storage_backend">
+              <option value="files">Files / qcow2</option>
+              <option value="zfs">ZFS</option>
+              <option value="lvm-thin">LVM-thin</option>
+            </select>
+          </label>
+          <label>
+            <span>Exposure</span>
+            <select name="exposure_mode">
+              <option value="lan-vpn-only">LAN / VPN only</option>
+              <option value="public-opt-in">Public opt-in</option>
+            </select>
+          </label>
+          <label class="host-remote-field"><span>SSH host</span><input name="ssh_host" placeholder="192.168.1.44"></label>
+          <label class="host-remote-field"><span>SSH user</span><input name="ssh_user" placeholder="operator"></label>
+          <label class="host-remote-field"><span>SSH port</span><input name="ssh_port" type="number" min="1" value="22"></label>
+          <label class="host-windows-field"><span>WSL distro</span><input name="wsl_distribution" placeholder="Ubuntu"></label>
+        </div>
+        <div id="host-mode-help" class="muted">
+          Choose how VPSdash reaches the host. Windows host modes run the hypervisor stack inside the selected WSL distro.
+        </div>
+        <div id="host-capability-readout" class="capacity-readout"></div>
+        <div class="button-row">
+          <button type="submit">Save Host</button>
+          <button id="prepare-host" class="secondary" type="button">Save + Prepare Host</button>
+        </div>
+        <details class="advanced-shell">
+          <summary>Advanced host options</summary>
+          <div class="field-grid">
+            <label><span>Runtime root</span><input name="config_runtime_root" placeholder="/var/lib/vpsdash"></label>
+            <label><span>ZFS pool</span><input name="config_zfs_pool" placeholder="tank"></label>
+            <label><span>ZFS dataset root</span><input name="config_zfs_dataset_root" placeholder="doplets"></label>
+            <label><span>LVM volume group</span><input name="config_lvm_vg" placeholder="vg_vpsdash"></label>
+            <label><span>LVM thinpool</span><input name="config_lvm_thinpool" placeholder="thinpool"></label>
+            <label><span>Libvirt network</span><input name="config_libvirt_network" placeholder="default"></label>
+            <label><span>Reserved CPU threads</span><input name="config_reserve_cpu_threads" type="number" min="0" value="1"></label>
+            <label><span>Reserved RAM (MB)</span><input name="config_reserve_ram_mb" type="number" min="0" value="2048"></label>
+            <label><span>Reserved Disk (GB)</span><input name="config_reserve_disk_gb" type="number" min="0" value="20"></label>
+          </div>
+          <label><span>ZFS pool devices</span><textarea name="config_zfs_devices" rows="2" placeholder="/dev/sdb&#10;/dev/sdc"></textarea></label>
+          <label><span>LVM PV devices</span><textarea name="config_lvm_devices" rows="2" placeholder="/dev/sdd&#10;/dev/sde"></textarea></label>
+          <label class="checkbox"><input name="mixed_use_allowed" type="checkbox"> Allow mixed-use host with explicit warnings</label>
+          <label class="checkbox"><input name="mixed_use_warning_acknowledged" type="checkbox"> I understand mixed-use weakens isolation and supportability</label>
+          <label><span>Notes</span><textarea name="notes" rows="3" placeholder="Dedicated host recommended."></textarea></label>
+          <div class="button-row compact">
+            <button id="capture-host-inventory" class="secondary" type="button">Refresh Inventory</button>
+            <button id="host-acceptance" class="secondary" type="button">Acceptance Report</button>
+            <button id="delete-host" class="danger" type="button">Delete Host</button>
+          </div>
+        </details>
+      </form>
+
+      <div class="list-shell">
+        <table id="hosts-table" class="data-table"></table>
+      </div>
+    </div>
+
+    <div class="card workspace-panel" id="doplets-panel">
+      <div class="section-header">
+        <div>
+          <div class="eyebrow">Doplet Workspace</div>
+          <h2>2. Create a VPS</h2>
+          <p class="workspace-copy">Pick a prepared host, keep the defaults small, and create one simple Doplet VPS first. You can connect right away with Open Terminal once the machine exists.</p>
+        </div>
+        <button id="clear-doplet-form" class="secondary" type="button">New Doplet</button>
+      </div>
+
+      <form id="doplet-form" class="stack-form">
+        <input type="hidden" name="id">
+        <div class="field-grid">
+          <label><span>Name</span><input name="name" placeholder="builder-01"></label>
+          <label><span>Slug</span><input name="slug" placeholder="builder-01"></label>
+          <label><span>Host</span><select name="host_id" id="doplet-host-select"></select></label>
+          <label><span>Image</span><select name="image_id" id="doplet-image-select"></select></label>
+          <label><span>Flavor</span><select name="flavor_id" id="doplet-flavor-select"></select></label>
+          <label><span>Primary network</span><select name="primary_network_id" id="doplet-network-select"></select></label>
+          <label><span>vCPU</span><input name="vcpu" type="number" min="1" value="1"></label>
+          <label><span>RAM (MB)</span><input name="ram_mb" type="number" min="256" value="1024"></label>
+          <label><span>Disk (GB)</span><input name="disk_gb" type="number" min="1" value="20"></label>
+          <label><span>Bootstrap user</span><input name="bootstrap_user" value="ubuntu"></label>
+          <label>
+            <span>Storage</span>
+            <select name="storage_backend">
+              <option value="files">Files / qcow2</option>
+              <option value="zfs">ZFS</option>
+              <option value="lvm-thin">LVM-thin</option>
+            </select>
+          </label>
+        </div>
+
+        <label><span>SSH public keys</span><textarea name="ssh_public_keys" rows="3" placeholder="One public key per line"></textarea></label>
+
+        <div id="capacity-readout" class="capacity-readout"></div>
+        <div id="doplet-terminal-readout" class="capacity-readout">
+          Save or select a Doplet to review access posture while you size the VPS. Runtime terminal actions live in the management panel below.
+        </div>
+
+        <div class="button-row">
+          <button type="submit">Save Draft</button>
+          <button id="queue-create-doplet" class="secondary" type="button">Create VPS</button>
+        </div>
+        <details class="advanced-shell">
+          <summary>Advanced Doplet configuration</summary>
+          <div class="field-grid">
+            <label>
+              <span>Security tier</span>
+              <select name="security_tier">
+                <option value="standard">Standard</option>
+                <option value="network-exposed">Network exposed</option>
+                <option value="privileged-hardware">Privileged hardware</option>
+              </select>
+            </label>
+            <label class="checkbox"><input name="backup_policy_enabled" type="checkbox"> Scheduled backups enabled</label>
+            <label><span>Backup every (minutes)</span><input name="backup_schedule_minutes" type="number" min="0" value="0"></label>
+            <label><span>Retain count</span><input name="backup_retain_count" type="number" min="0" value="7"></label>
+            <label class="checkbox"><input name="backup_verify_after_upload" type="checkbox" checked> Verify after upload</label>
+            <label class="checkbox"><input name="backup_prune_remote" type="checkbox"> Prune provider copies too</label>
+            <label><span>Provider ids JSON</span><input name="backup_provider_ids_json" placeholder="[1,2]"></label>
+          </div>
+
+          <div class="field-grid lifecycle-grid">
+            <label><span>Snapshot name</span><input name="snapshot_name" placeholder="pre-upgrade-20260320"></label>
+            <label><span>Clone name</span><input name="clone_name" placeholder="builder-01-clone"></label>
+            <label><span>Clone slug</span><input name="clone_slug" placeholder="builder-01-clone"></label>
+            <label><span>Clone host override</span><select name="clone_host_id" id="doplet-clone-host-select"></select></label>
+            <label><span>Clone network override</span><select name="clone_primary_network_id" id="doplet-clone-network-select"></select></label>
+            <label><span>Clone storage override</span>
+              <select name="clone_storage_backend">
+                <option value="">Source storage backend</option>
+                <option value="files">Files / qcow2</option>
+                <option value="zfs">ZFS</option>
+                <option value="lvm-thin">LVM-thin</option>
+              </select>
+            </label>
+            <label><span>GPU mode</span>
+              <select name="gpu_assignment_mode" id="gpu-assignment-mode">
+                <option value="passthrough">Passthrough</option>
+                <option value="mediated">Mediated / vGPU</option>
+              </select>
+            </label>
+            <label><span>GPU device</span><select name="gpu_parent_address" id="gpu-parent-select"></select></label>
+            <label><span>Mediated profile</span><select name="gpu_profile_id" id="gpu-profile-select"></select></label>
+            <label><span>GPU assignment action</span><button id="add-gpu-assignment" class="secondary" type="button">Add GPU Assignment</button></label>
+          </div>
+
+          <div class="field-grid lifecycle-grid">
+            <label><span>Resize vCPU</span><input name="resize_vcpu" type="number" min="1" value="1"></label>
+            <label><span>Resize RAM (MB)</span><input name="resize_ram_mb" type="number" min="256" value="1024"></label>
+            <label><span>Resize Disk (GB)</span><input name="resize_disk_gb" type="number" min="1" value="20"></label>
+            <label><span>GPU preflight</span><div id="gpu-preflight-readout" class="muted">Save or select a Doplet to review GPU preflight warnings.</div></label>
+          </div>
+
+          <label><span>GPU assignments JSON</span><textarea name="gpu_assignments_json" rows="4" placeholder='[{"mode":"passthrough","pci_address":"0000:65:00.0"}]'></textarea></label>
+          <div id="gpu-capability-readout" class="capacity-readout"></div>
+
+          <div class="button-row compact">
+            <button id="resize-doplet" class="secondary" type="button">Resize Now</button>
+            <button id="backup-doplet" class="secondary" type="button">Backup Now</button>
+            <button id="snapshot-doplet" class="secondary" type="button">Snapshot Now</button>
+            <button id="clone-doplet" class="secondary" type="button">Clone Now</button>
+          </div>
+        </details>
+      </form>
+    </div>
+  </section>
+
+  <div class="workspace-divider"><span>Doplet management</span></div>
+  <section class="card workspace-panel" id="manage-doplets-panel">
+    <div class="section-header">
+      <div>
+        <div class="eyebrow">Existing Doplets</div>
+        <h2>3. Manage what you already created</h2>
+        <p class="workspace-copy">Select a saved Doplet to inspect its real state, edit the draft, open a terminal, start or stop it, or delete it cleanly.</p>
+      </div>
+      <div class="button-row compact section-header-actions">
+        <button id="edit-selected-doplet" class="secondary" type="button">Edit Selected</button>
+        <button id="new-doplet-draft" class="secondary" type="button">New Draft</button>
+      </div>
+    </div>
+
+    <div id="doplet-state-counts" class="capacity-readout management-counts"></div>
+
+    <div class="workspace-grid management-grid">
+      <div class="support-card management-card">
+        <div class="eyebrow">Selected Doplet</div>
+        <div id="doplet-management-summary" class="management-summary">Select a Doplet below to review host, image, size, runtime state, and recent task activity.</div>
+      </div>
+      <div class="support-card management-card">
+        <div class="eyebrow">Access</div>
+        <div id="doplet-management-access" class="management-summary">Terminal access details appear here after you select a Doplet.</div>
+        <div class="button-row compact">
+          <button id="open-doplet-terminal" class="secondary" type="button">Open Terminal</button>
+          <button id="copy-doplet-terminal-command" class="secondary" type="button">Copy Terminal Command</button>
+        </div>
+      </div>
+      <div class="support-card management-card">
+        <div class="eyebrow">Lifecycle</div>
+        <div id="doplet-management-state" class="capacity-readout management-state-readout"></div>
+        <div class="button-row compact">
+          <button id="doplet-start" class="secondary" type="button">Start</button>
+          <button id="doplet-shutdown" class="secondary" type="button">Shutdown</button>
+          <button id="doplet-reboot" class="secondary" type="button">Reboot</button>
+          <button id="doplet-force-stop" class="secondary" type="button">Force Stop</button>
+          <button id="doplet-delete-task" class="danger" type="button">Delete Runtime</button>
+          <button id="delete-doplet" class="danger" type="button">Delete Record</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="list-shell">
+      <table id="doplets-table" class="data-table"></table>
+    </div>
+  </section>
+
+  <details class="advanced-shell page-advanced">
+    <summary>Advanced networking, recovery, backups, and admin</summary>
+
+  <div class="workspace-divider"><span>Networks and backup fabric</span></div>
+  <section class="two-up">
+    <div class="card workspace-panel" id="networks-panel">
+      <div class="section-header">
+        <div>
+          <div class="eyebrow">Networks</div>
+          <h2>Isolated, NAT, and bridged segments</h2>
+          <p class="workspace-copy">Keep Doplets private by default, attach bridged or NAT-backed networks when needed, and manage policy near the network definition.</p>
+        </div>
+        <button id="clear-network-form" class="secondary" type="button">New Network</button>
+      </div>
+
+      <form id="network-form" class="stack-form">
+        <input type="hidden" name="id">
+        <div class="field-grid">
+          <label><span>Name</span><input name="name" placeholder="private-a"></label>
+          <label><span>Slug</span><input name="slug" placeholder="private-a"></label>
+          <label><span>Host</span><select name="host_id" id="network-host-select"></select></label>
+          <label>
+            <span>Mode</span>
+            <select name="mode">
+              <option value="nat">NAT</option>
+              <option value="bridge">Bridge</option>
+              <option value="private">Private</option>
+            </select>
+          </label>
+          <label><span>CIDR</span><input name="cidr" placeholder="10.10.0.0/24"></label>
+          <label><span>Bridge name</span><input name="bridge_name" placeholder="br0"></label>
+        </div>
+        <label class="checkbox"><input name="nat_enabled" type="checkbox" checked> NAT enabled</label>
+        <label><span>Firewall policy JSON</span><textarea name="firewall_policy" rows="3" placeholder='{"ingress":[],"egress":[]}'></textarea></label>
+        <div class="button-row">
+          <button type="submit">Save Network</button>
+          <button id="apply-network" class="secondary" type="button">Apply Now</button>
+          <button id="delete-network-runtime" class="secondary" type="button">Delete Runtime Now</button>
+          <button id="delete-network" class="danger" type="button">Delete Network</button>
+        </div>
+      </form>
+
+      <div class="list-shell">
+        <table id="networks-table" class="data-table"></table>
+      </div>
+    </div>
+
+    <div class="card workspace-panel" id="providers-panel">
+      <div class="section-header">
+        <div>
+          <div class="eyebrow">Backup Fabric</div>
+          <h2>Local and object-storage providers</h2>
+          <p class="workspace-copy">Attach local targets and S3-compatible providers, track quotas, and keep retention policy close to the backup fabric itself.</p>
+        </div>
+        <button id="clear-provider-form" class="secondary" type="button">New Provider</button>
+      </div>
+
+      <form id="provider-form" class="stack-form">
+        <input type="hidden" name="id">
+        <div class="field-grid">
+          <label><span>Name</span><input name="name" placeholder="MinIO Free Tier"></label>
+          <label><span>Slug</span><input name="slug" placeholder="minio-free-tier"></label>
+          <label>
+            <span>Type</span>
+            <select name="provider_type">
+              <option value="local">Local</option>
+              <option value="s3">S3 compatible</option>
+            </select>
+          </label>
+          <label><span>Endpoint</span><input name="endpoint" placeholder="https://minio.example.com"></label>
+          <label><span>Bucket</span><input name="bucket" placeholder="vpsdash"></label>
+          <label><span>Region</span><input name="region" placeholder="us-east-1"></label>
+          <label><span>Root path</span><input name="root_path" placeholder="doplets/backups"></label>
+          <label><span>Access key</span><input name="access_key_id" placeholder="minioadmin"></label>
+          <label><span>Secret key</span><input name="secret_key" placeholder="Paste only to set or rotate"></label>
+        </div>
+        <label><span>Quota model JSON</span><textarea name="quota_model" rows="3" placeholder='{"free_tier_gb": 10, "notes":"Spread across providers."}'></textarea></label>
+        <label><span>Policy notes</span><textarea name="policy_notes" rows="2" placeholder="Immutable bucket, versioning enabled, free-tier bucket."></textarea></label>
+        <label class="checkbox"><input name="enabled" type="checkbox" checked> Enabled</label>
+        <div class="button-row">
+          <button id="save-provider" type="submit">Save Provider</button>
+          <button id="test-provider" class="secondary" type="button">Test Provider</button>
+          <button id="delete-provider" class="danger" type="button">Delete Provider</button>
+        </div>
+      </form>
+
+      <div class="list-shell">
+        <table id="providers-table" class="data-table"></table>
+      </div>
+    </div>
+  </section>
+
+  <div class="workspace-divider"><span>Recovery and access</span></div>
+  <section class="two-up">
+    <div class="card workspace-panel" id="snapshots-panel">
+      <div class="section-header">
+        <div>
+          <div class="eyebrow">Snapshots</div>
+          <h2>Snapshot and restore workspace</h2>
+          <p class="workspace-copy">Select a snapshot, restore in place, or recover into a new Doplet with host and network overrides.</p>
+        </div>
+        <button id="clear-restore-form" class="secondary" type="button">Clear Restore Draft</button>
+      </div>
+
+      <form id="restore-form" class="stack-form">
+        <input type="hidden" name="snapshot_id">
+        <div id="restore-source-info" class="muted">Select a snapshot to restore it in place or create a recovered Doplet.</div>
+        <div class="field-grid">
+          <label><span>Restore into existing Doplet</span><select name="target_doplet_id" id="restore-target-select"></select></label>
+          <label><span>Recovered Doplet name</span><input name="name" placeholder="builder-01-restore"></label>
+          <label><span>Recovered slug</span><input name="slug" placeholder="builder-01-restore"></label>
+          <label><span>Recovered host</span><select name="host_id" id="restore-host-select"></select></label>
+          <label><span>Recovered network</span><select name="primary_network_id" id="restore-network-select"></select></label>
+          <label><span>Recovered storage</span>
+            <select name="storage_backend">
+              <option value="">Source storage backend</option>
+              <option value="files">Files / qcow2</option>
+              <option value="zfs">ZFS</option>
+              <option value="lvm-thin">LVM-thin</option>
+            </select>
+          </label>
+        </div>
+        <div class="button-row">
+          <button id="queue-restore-snapshot" type="button">Restore Now</button>
+        </div>
+      </form>
+
+      <div class="list-shell">
+        <table id="snapshots-table" class="data-table"></table>
+      </div>
+    </div>
+
+    <div class="card workspace-panel" id="access-panel">
+      <div class="section-header">
+        <div>
+          <div class="eyebrow">Access</div>
+          <h2>Operators and MFA posture</h2>
+          <p class="workspace-copy">Keep local operators, remote admins, and MFA posture visible in the same secure control plane.</p>
+        </div>
+      </div>
+
+      <form id="user-form" class="stack-form">
+        <div class="field-grid">
+          <label><span>Username</span><input name="username" placeholder="operator"></label>
+          <label><span>Email</span><input name="email" placeholder="operator@example.com"></label>
+          <label><span>Password</span><input name="password" type="password"></label>
+          <label>
+            <span>Role</span>
+            <select name="role">
+              <option value="operator">Operator</option>
+              <option value="owner">Owner</option>
+              <option value="viewer">Viewer</option>
+            </select>
+          </label>
+        </div>
+        <label class="checkbox"><input name="mfa_enabled" type="checkbox" checked> MFA required</label>
+        <button id="save-user" type="submit">Create User</button>
+      </form>
+
+      <div class="list-shell">
+        <table id="users-table" class="data-table"></table>
+      </div>
+    </div>
+  </section>
+
+  <div class="workspace-divider"><span>Task fabric</span></div>
+  <section class="card workspace-panel" id="tasks-panel">
+    <div class="section-header">
+      <div>
+        <div class="eyebrow">Task Fabric</div>
+        <h2>Queued work and backup history</h2>
+        <p class="workspace-copy">Launch work, inspect logs, rerun policies, and keep backup state visible without switching surfaces.</p>
+      </div>
+      <div class="button-row compact">
+        <button id="run-backup-scheduler" class="secondary" type="button">Run Backup Scheduler</button>
+        <button id="prune-backups" class="secondary" type="button">Prune Backups</button>
+        <button id="refresh-tasks" class="secondary" type="button">Refresh Tasks</button>
+      </div>
+    </div>
+
+    <div class="list-shell">
+      <table id="tasks-table" class="data-table"></table>
+    </div>
+    <div class="list-shell compact-list">
+      <div id="task-detail" class="log-shell">Select a task to inspect progress, logs, and results.</div>
+    </div>
+    <div class="list-shell compact-list">
+      <table id="backups-table" class="data-table"></table>
+    </div>
+  </section>
+
+  <div class="workspace-divider"><span>Audit</span></div>
+  <section class="card workspace-panel" id="audit-panel">
+    <div class="section-header">
+      <div>
+        <div class="eyebrow">Audit</div>
+        <h2>Recent control-plane activity</h2>
+        <p class="workspace-copy">Review host changes, Doplet actions, provider changes, and admin operations in one running ledger.</p>
+      </div>
+    </div>
+    <div class="list-shell">
+      <table id="audit-table" class="data-table"></table>
+    </div>
+  </section>
+  </details>
+
+  <script id="initial-bootstrap" type="application/json">{{ data|tojson }}</script>
+  <script src="{{ url_for('static', filename='web_control.js') }}"></script>
+{% endblock %}
+
+

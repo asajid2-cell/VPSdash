@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="two-up">
+  <section class="card">
+    <div class="eyebrow">Email Verification</div>
+    <h1>Verify this device</h1>
+    <p class="muted">A verification code was sent through the configured email path. New-device checks keep remote admin safer when the web surface is exposed beyond a local network.</p>
+  </section>
+
+  <section class="card">
+    <div class="workspace-intro">
+      <div class="eyebrow">Verification</div>
+      <div class="workspace-title">Finish sign-in</div>
+      <p class="workspace-copy">Enter the one-time code to trust this device and continue into the control plane.</p>
+    </div>
+    {% if error %}<div class="flash error">{{ error }}</div>{% endif %}
+    <form method="post" class="stack-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label><span>Verification code</span>
+        <input name="code" inputmode="numeric" required>
+      </label>
+      <button type="submit">Verify and sign in</button>
+    </form>
+  </section>
+</div>
+{% endblock %}

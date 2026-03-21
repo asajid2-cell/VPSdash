@@ -1,0 +1,27 @@
+{
+  "id": "builtin-generic-remote-bootstrap",
+  "name": "Generic Remote Bootstrap",
+  "description": "Use Computer A to manage a fresh Linux server on Computer B, starting with password SSH before switching to keys.",
+  "source_template_id": "generic-docker-webapp",
+  "host_defaults": {
+    "name": "Computer B Server",
+    "mode": "remote-linux",
+    "device_role": "computer-b-server",
+    "bootstrap_auth": "password-bootstrap",
+    "ssh_user": "",
+    "ssh_host": "",
+    "ssh_port": 22,
+    "ssh_key_path": "",
+    "wsl_distribution": "Ubuntu"
+  },
+  "project_defaults": {
+    "template_id": "generic-docker-webapp",
+    "name": "Generic Docker Web App",
+    "repo_url": "",
+    "branch": "main",
+    "deploy_path": "~/apps/my-app",
+    "primary_domain": "",
+    "domains": [],
+    "letsencrypt_email": "admin@example.com"
+  }
+}

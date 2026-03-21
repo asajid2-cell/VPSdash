@@ -1,0 +1,46 @@
+{
+  "id": "generic-docker-webapp",
+  "name": "Generic Docker Web App",
+  "description": "A reusable template for a Docker Compose application behind Nginx with optional TLS and backups.",
+  "repo_url": "",
+  "branch": "main",
+  "deploy_path": "~/apps/my-app",
+  "primary_domain": "",
+  "domains": [],
+  "proxy_target_port": 5000,
+  "nginx_site_name": "my-app",
+  "services": [
+    {
+      "name": "app",
+      "kind": "docker-compose",
+      "public_port": 5000,
+      "internal_only": true
+    }
+  ],
+  "persistent_paths": [
+    "data",
+    "uploads"
+  ],
+  "backup_paths": [
+    "data",
+    "uploads"
+  ],
+  "build_steps": [],
+  "env": [
+    {
+      "key": "SECRET_KEY",
+      "label": "Application secret",
+      "value": "",
+      "required": false,
+      "secret": true
+    }
+  ],
+  "health_checks": [
+    {
+      "title": "Main service health",
+      "command": "curl -I http://127.0.0.1:5000/",
+      "detail": "Confirm the main web app is listening locally.",
+      "timeout": 30
+    }
+  ]
+}

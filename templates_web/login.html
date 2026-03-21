@@ -1,0 +1,39 @@
+﻿{% extends "base.html" %}
+{% block content %}
+<div class="two-up">
+  <section class="card">
+    <div class="eyebrow">Secure By Default</div>
+    <h1>Sign in to VPSdash</h1>
+    <p class="muted">Use the control plane to prepare a Linux hypervisor, run Doplets on local WSL-backed Windows hosts, and manage storage, networks, backups, and task history from one place.</p>
+    <ul>
+      <li>Default account: <code>owner</code></li>
+      <li>Default password: <code>change-me-now</code></li>
+      {% if email_login_verification_enabled %}
+      <li>Email verification is enabled. Challenge messages are written to <code>data/outbox/</code> unless SMTP is configured.</li>
+      {% else %}
+      <li>Email verification is disabled in this build so local setup stays frictionless.</li>
+      {% endif %}
+    </ul>
+  </section>
+
+  <section class="card">
+    <div class="workspace-intro">
+      <div class="eyebrow">Account Access</div>
+      <div class="workspace-title">Enter your operator credentials.</div>
+      <p class="workspace-copy">This surface stays local-first and secure by default. Public exposure remains opt-in at the host layer.</p>
+    </div>
+    {% if error %}<div class="flash error">{{ error }}</div>{% endif %}
+    <form method="post" class="stack-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label><span>Username or email</span>
+        <input name="username" autocomplete="username" required>
+      </label>
+      <label><span>Password</span>
+        <input name="password" type="password" autocomplete="current-password" required>
+      </label>
+      <button type="submit">Continue</button>
+    </form>
+  </section>
+</div>
+{% endblock %}
+

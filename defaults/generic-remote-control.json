@@ -1,0 +1,27 @@
+{
+  "id": "builtin-generic-remote-control",
+  "name": "Generic Remote Control",
+  "description": "Use Computer A as the control machine after SSH key access already exists for Computer B.",
+  "source_template_id": "generic-docker-webapp",
+  "host_defaults": {
+    "name": "Computer A -> Computer B",
+    "mode": "remote-linux",
+    "device_role": "computer-a-main",
+    "bootstrap_auth": "ssh-key-ready",
+    "ssh_user": "",
+    "ssh_host": "",
+    "ssh_port": 22,
+    "ssh_key_path": "",
+    "wsl_distribution": "Ubuntu"
+  },
+  "project_defaults": {
+    "template_id": "generic-docker-webapp",
+    "name": "Generic Docker Web App",
+    "repo_url": "",
+    "branch": "main",
+    "deploy_path": "~/apps/my-app",
+    "primary_domain": "",
+    "domains": [],
+    "letsencrypt_email": "admin@example.com"
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "id": "builtin-generic-windows-wsl-self-host",
+  "name": "Windows + WSL Self-Host",
+  "description": "Turn this Windows machine into the host by running the stack inside WSL and managing it locally from the same app.",
+  "source_template_id": "generic-docker-webapp",
+  "host_defaults": {
+    "name": "This Windows Host",
+    "mode": "windows-local",
+    "device_role": "computer-b-server",
+    "bootstrap_auth": "ssh-key-ready",
+    "ssh_user": "",
+    "ssh_host": "",
+    "ssh_port": 22,
+    "ssh_key_path": "",
+    "wsl_distribution": "Ubuntu"
+  },
+  "project_defaults": {
+    "template_id": "generic-docker-webapp",
+    "name": "Generic Docker Web App",
+    "repo_url": "",
+    "branch": "main",
+    "deploy_path": "~/apps/my-app",
+    "primary_domain": "",
+    "domains": [],
+    "letsencrypt_email": "admin@example.com"
+  }
+}

@@ -1,0 +1,228 @@
+﻿<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>VPSdash</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">VD</div>
+          <div>
+            <h1>VPSdash</h1>
+            <p>Self-hosting control center</p>
+          </div>
+        </div>
+        <nav class="nav">
+          <a href="#overview">Overview</a>
+          <a href="#wizard">Setup Wizard</a>
+          <a href="#plan">Deployment Plan</a>
+          <a href="#operations">Operations</a>
+        </nav>
+        <div class="sidebar-note">
+          <strong>Design target</strong>
+          <p>Fast setup for old PCs, laptops, or remote VPS hosts without hunting through shell notes.</p>
+        </div>
+      </aside>
+
+      <main class="main">
+        <section class="hero" id="overview">
+          <div>
+            <span class="eyebrow">One-click hosting workflow</span>
+            <h2>Walk from machine to managed host in one dashboard.</h2>
+            <p>
+              Configure SSH, templates, domains, secrets, reverse proxy, backups, and monitoring in one place.
+              VPSdash keeps the deployment plan and the operating view together.
+            </p>
+          </div>
+          <div class="hero-actions">
+            <button id="refreshAppButton" class="button button-secondary">Refresh State</button>
+            <button id="loadGenericTemplateButton" class="button">Load Generic Template</button>
+          </div>
+        </section>
+
+        <section class="grid grid-3 metrics">
+          <article class="panel metric">
+            <span class="metric-label">Templates</span>
+            <strong id="metricTemplates">0</strong>
+            <p>Seeded deployment blueprints ready to adapt.</p>
+          </article>
+          <article class="panel metric">
+            <span class="metric-label">Saved Hosts</span>
+            <strong id="metricHosts">0</strong>
+            <p>Remote and local environments tracked in one state file.</p>
+          </article>
+          <article class="panel metric">
+            <span class="metric-label">Saved Projects</span>
+            <strong id="metricProjects">0</strong>
+            <p>Reusable deploy configs with secrets, ports, and backups.</p>
+          </article>
+        </section>
+
+        <section class="grid layout-main" id="wizard">
+          <div class="panel section-panel">
+            <div class="section-head">
+              <div>
+                <span class="eyebrow">Wizard</span>
+                <h3>Host Setup</h3>
+              </div>
+              <select id="savedHostSelect" class="input compact"></select>
+            </div>
+            <div class="form-grid">
+              <label>
+                <span>Host label</span>
+                <input id="hostName" class="input" placeholder="My old laptop or Production VPS">
+              </label>
+              <label>
+                <span>Host mode</span>
+                <select id="hostMode" class="input">
+                  <option value="remote-linux">Remote Linux VPS</option>
+                  <option value="linux-local">Local Linux host</option>
+                  <option value="windows-local">Windows host with WSL2</option>
+                </select>
+              </label>
+              <label>
+                <span>SSH user</span>
+                <input id="hostSshUser" class="input" placeholder="root or operator">
+              </label>
+              <label>
+                <span>SSH host</span>
+                <input id="hostSshHost" class="input" placeholder="164.92.64.157">
+              </label>
+              <label>
+                <span>SSH port</span>
+                <input id="hostSshPort" class="input" type="number" value="22">
+              </label>
+              <label>
+                <span>SSH key path</span>
+                <input id="hostSshKey" class="input" list="keyCandidates" placeholder="C:\Users\you\.ssh\id_ed25519">
+                <datalist id="keyCandidates"></datalist>
+              </label>
+              <label>
+                <span>WSL distro</span>
+                <input id="hostWslDistribution" class="input" placeholder="Ubuntu">
+              </label>
+            </div>
+            <div class="inline-actions">
+              <button id="saveHostButton" class="button">Save Host</button>
+              <button id="runDiagnosticsButton" class="button button-secondary">Run Diagnostics</button>
+              <button id="runMonitorButton" class="button button-secondary">Capture Snapshot</button>
+            </div>
+            <div class="callout">
+              <strong>Power behavior</strong>
+              <p>
+                Windows and laptop hosts are still subject to sleep. VPSdash can prepare startup and monitoring,
+                but an asleep device is not an available server.
+              </p>
+            </div>
+          </div>
+
+          <div class="panel section-panel">
+            <div class="section-head">
+              <div>
+                <span class="eyebrow">Wizard</span>
+                <h3>Project Setup</h3>
+              </div>
+              <select id="savedProjectSelect" class="input compact"></select>
+            </div>
+            <div class="form-grid">
+              <label>
+                <span>Template</span>
+                <select id="templateSelect" class="input"></select>
+              </label>
+              <label>
+                <span>Project name</span>
+                <input id="projectName" class="input" placeholder="VPSdash">
+              </label>
+              <label class="span-2">
+                <span>Repository URL</span>
+                <input id="projectRepoUrl" class="input" placeholder="https://github.com/user/repo.git">
+              </label>
+              <label>
+                <span>Branch</span>
+                <input id="projectBranch" class="input" placeholder="main">
+              </label>
+              <label>
+                <span>Deploy path</span>
+                <input id="projectDeployPath" class="input" placeholder="~/apps/my-app">
+              </label>
+              <label>
+                <span>Primary domain</span>
+                <input id="projectPrimaryDomain" class="input" placeholder="example.com">
+              </label>
+              <label>
+                <span>Let's Encrypt email</span>
+                <input id="projectLetsEncryptEmail" class="input" placeholder="admin@example.com">
+              </label>
+              <label class="span-2">
+                <span>Additional domains</span>
+                <textarea id="projectDomains" class="input textarea" placeholder="www.example.com&#10;app.example.com"></textarea>
+              </label>
+            </div>
+
+            <div class="subsection">
+              <div class="section-head compact-head">
+                <h4>Environment Variables</h4>
+                <button id="addEnvButton" class="button button-ghost">Add Variable</button>
+              </div>
+              <div id="envList" class="stack"></div>
+            </div>
+
+            <div class="inline-actions">
+              <button id="saveProjectButton" class="button">Save Project</button>
+              <button id="generatePlanButton" class="button button-secondary">Generate Plan</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="grid layout-main" id="plan">
+          <div class="panel section-panel">
+            <div class="section-head">
+              <div>
+                <span class="eyebrow">Deploy</span>
+                <h3>Plan Summary</h3>
+              </div>
+              <div class="inline-actions">
+                <button id="dryRunButton" class="button button-secondary">Dry Run Plan</button>
+                <button id="executePlanButton" class="button">Execute Live Plan</button>
+              </div>
+            </div>
+            <div id="planSummary" class="summary-box empty-state">Generate a plan to see the full setup path.</div>
+            <div id="planWarnings" class="stack"></div>
+            <div id="planStages" class="stack"></div>
+          </div>
+
+          <div class="panel section-panel" id="operations">
+            <div class="section-head">
+              <div>
+                <span class="eyebrow">Operate</span>
+                <h3>Diagnostics and Monitoring</h3>
+              </div>
+            </div>
+            <div class="ops-grid">
+              <div>
+                <h4>Diagnostics</h4>
+                <div id="diagnosticsOutput" class="output-panel empty-state">Run diagnostics to inspect SSH, Docker, WSL, repo path, and memory state.</div>
+              </div>
+              <div>
+                <h4>Snapshot</h4>
+                <div id="monitorOutput" class="output-panel empty-state">Capture a monitoring snapshot to inspect uptime, listeners, memory, and containers.</div>
+              </div>
+              <div class="span-2">
+                <h4>Execution</h4>
+                <div id="executionOutput" class="output-panel empty-state">Dry run or execute a plan to see command-by-command results here.</div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
+
+
