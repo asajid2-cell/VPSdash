@@ -279,6 +279,7 @@ class DesktopTests(unittest.TestCase):
         try:
             self.assertTrue(hasattr(window, "native_task_tree"))
             self.assertTrue(hasattr(window, "native_asset_tree"))
+            self.assertTrue(hasattr(window, "native_task_history"))
             self.assertGreaterEqual(window.native_asset_tree.topLevelItemCount(), 0)
         finally:
             window.close()
@@ -405,6 +406,7 @@ class DesktopTests(unittest.TestCase):
         window = VpsDashWindow(VpsDashService(self.root))
         try:
             window._project_source_setup_commands = MagicMock(return_value=None)
+            window._project_source_setup_needs_install = MagicMock(return_value=None)
             window.service.upsert_platform_host = MagicMock(return_value={"id": 5, "name": "This PC", "mode": "windows-local"})
             window.service.capture_platform_host_inventory = MagicMock(return_value={"host": {"id": 5}})
             window.service.queue_prepare_platform_host = MagicMock(return_value={"id": 17, "status": "planned"})
@@ -417,6 +419,102 @@ class DesktopTests(unittest.TestCase):
             window.service.capture_platform_host_inventory.assert_called_once_with(5, actor="desktop")
             window.service.queue_prepare_platform_host.assert_called_once_with(5, actor="desktop")
             window.service.launch_platform_task.assert_called_once_with(17, actor="desktop", dry_run=False)
+        finally:
+            window.close()
+
+    def test_initial_setup_skips_prepare_when_host_already_ready(self) -> None:
+        window = VpsDashWindow(VpsDashService(self.root))
+        try:
+            window._project_source_setup_commands = MagicMock(return_value=None)
+            window._project_source_setup_needs_install = MagicMock(return_value=None)
+            window.service.upsert_platform_host = MagicMock(return_value={"id": 5, "name": "This PC", "mode": "windows-local"})
+            window.service.capture_platform_host_inventory = MagicMock(
+                return_value={"id": 5, "status": "ready", "inventory": {"resources": {"virtualization_ready": True}}}
+            )
+            window._launch_queued_platform_task = MagicMock()
+
+            result = window._perform_local_initial_setup({"name": "This PC", "mode": "windows-local", "wsl_distribution": "Ubuntu"})
+
+            self.assertTrue(result["prepare"]["skipped"])
+            window._launch_queued_platform_task.assert_not_called()
+        finally:
+            window.close()
+
+    def test_archived_tasks_are_removed_from_active_task_center_and_shown_in_history(self) -> None:
+        window = VpsDashWindow(VpsDashService(self.root))
+        try:
+            window.bootstrap_data = {
+                "control_plane": {
+                    "tasks": [
+                        {"id": 1, "task_type": "create-doplet", "status": "running", "progress": 50, "target_type": "doplet", "target_id": "11"},
+                        {"id": 2, "task_type": "delete-doplet", "status": "cancelled", "progress": 0, "target_type": "doplet", "target_id": "12", "updated_at": "2026-03-21T12:00:00+00:00"},
+                        {"id": 3, "task_type": "prepare-host", "status": "complete", "progress": 100, "target_type": "host", "target_id": "5", "updated_at": "2026-03-21T12:01:00+00:00"},
+                    ]
+                }
+            }
+            window._populate_native_platform_views()
+            self.assertEqual(window.native_task_tree.topLevelItemCount(), 1)
+            self.assertIn("delete-doplet", window.native_task_history.toPlainText())
+            self.assertIn("prepare-host", window.native_task_history.toPlainText())
+        finally:
+            window.close()
+
+    def test_failed_tasks_are_mirrored_into_error_console(self) -> None:
+        window = VpsDashWindow(VpsDashService(self.root))
+        try:
+            window.bootstrap_data = {
+                "control_plane": {
+                    "tasks": [
+                        {
+                            "id": 11,
+                            "task_type": "create-doplet",
+                            "status": "failed",
+                            "progress": 35,
+                            "target_type": "doplet",
+                            "target_id": "22",
+                            "result_payload": {"error": "No boot image found"},
+                            "log_output": "[seed]\nmissing cloud image",
+                            "updated_at": "2026-03-21T12:10:00+00:00",
+                        }
+                    ]
+                }
+            }
+            window._populate_native_platform_views()
+            console_text = window.error_output["output"].toPlainText()
+            self.assertIn("create-doplet FAILED", console_text)
+            self.assertIn("No boot image found", console_text)
+            self.assertIn("missing cloud image", console_text)
+        finally:
+            window.close()
+
+    def test_selecting_task_mirrors_log_output_into_execution_log(self) -> None:
+        window = VpsDashWindow(VpsDashService(self.root))
+        try:
+            window.bootstrap_data = {
+                "control_plane": {
+                    "tasks": [
+                        {
+                            "id": 41,
+                            "task_type": "prepare-host",
+                            "status": "running",
+                            "progress": 60,
+                            "target_type": "host",
+                            "target_id": "5",
+                            "result_payload": {"latest_step": "install libvirt"},
+                            "log_output": "[install]\napt-get install qemu-kvm",
+                        }
+                    ]
+                }
+            }
+            window._populate_native_platform_views()
+            self.assertIn("apt-get install qemu-kvm", window.execution_output["output"].toPlainText())
+        finally:
+            window.close()
+
+    def test_sidebar_spacing_is_roomier_for_nav_and_quick_actions(self) -> None:
+        window = VpsDashWindow(VpsDashService(self.root))
+        try:
+            self.assertGreaterEqual(window.nav_buttons[0].parentWidget().layout().spacing(), 12)
         finally:
             window.close()
 

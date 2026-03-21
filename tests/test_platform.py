@@ -9,7 +9,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from vpsdash.app import create_app
+from vpsdash.database import session_scope
 from vpsdash.host_agent import HostAgent
+from vpsdash.models import TaskRecord
 from vpsdash.platform_service import PlatformService
 from vpsdash.security import sign_json_payload
 
@@ -91,6 +93,73 @@ class PlatformTests(unittest.TestCase):
                         "disk_gb": 40,
                     }
                 )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_bootstrap_reconciles_running_doplet_runtime_state(self) -> None:
+        root = self._isolated_root()
+        try:
+            service = PlatformService(root)
+            host = service.upsert_host({"name": "Host A", "host_mode": "windows-local", "wsl_distribution": "Ubuntu"})
+            doplet = service.upsert_doplet(
+                {
+                    "name": "VM1",
+                    "host_id": host["id"],
+                    "status": "stopped",
+                    "vcpu": 1,
+                    "ram_mb": 1024,
+                    "disk_gb": 20,
+                }
+            )
+            with patch(
+                "vpsdash.platform_service.inspect_doplet_runtime",
+                return_value={
+                    "exists": True,
+                    "raw_state": "running",
+                    "status": "running",
+                    "ip_addresses": ["192.168.122.77"],
+                },
+            ):
+                bootstrap = service.bootstrap()
+            live = next(item for item in bootstrap["doplets"] if item["id"] == doplet["id"])
+            self.assertEqual(live["status"], "running")
+            self.assertEqual(live["ip_addresses"], ["192.168.122.77"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_runtime_reconcile_skips_doplets_with_active_tasks(self) -> None:
+        root = self._isolated_root()
+        try:
+            service = PlatformService(root)
+            host = service.upsert_host({"name": "Host A", "host_mode": "windows-local", "wsl_distribution": "Ubuntu"})
+            doplet = service.upsert_doplet(
+                {
+                    "name": "VM1",
+                    "host_id": host["id"],
+                    "status": "provisioning",
+                    "vcpu": 1,
+                    "ram_mb": 1024,
+                    "disk_gb": 20,
+                }
+            )
+            with session_scope(service.session_factory) as session:
+                session.add(
+                    TaskRecord(
+                        task_type="create-doplet",
+                        target_type="doplet",
+                        target_id=str(doplet["id"]),
+                        status="running",
+                        progress=50,
+                        command_plan=[],
+                        result_payload={},
+                    )
+                )
+            with patch("vpsdash.platform_service.inspect_doplet_runtime") as inspect_mock:
+                result = service.reconcile_runtime_state(force=True)
+            self.assertEqual(result["changed"], 0)
+            inspect_mock.assert_not_called()
+            refreshed = next(item for item in service.bootstrap()["doplets"] if item["id"] == doplet["id"])
+            self.assertEqual(refreshed["status"], "provisioning")
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -545,6 +614,36 @@ class PlatformTests(unittest.TestCase):
                 )
             with self.assertRaises(ValueError):
                 agent.materialize_file({}, "/etc/shadow", root / "forbidden.txt")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_host_agent_accepts_create_cleanup_commands_inside_create_policy(self) -> None:
+        root = self._isolated_root()
+        try:
+            service = PlatformService(root)
+            agent = HostAgent(service.config)
+            steps = [
+                {
+                    "title": "Clear stale Doplet runtime artifacts",
+                    "command": "virsh destroy builder-01 >/dev/null 2>&1 || true && virsh undefine builder-01 --nvram --remove-all-storage >/dev/null 2>&1 || true",
+                    "run_mode": "local",
+                }
+            ]
+            signature = sign_json_payload(
+                service.config,
+                {"policy": "create-doplet", "target_type": "doplet", "target_id": "1", "steps": steps},
+            )
+            results = agent.execute_task_plan(
+                {"mode": "linux-local"},
+                steps,
+                dry_run=True,
+                signature=signature,
+                policy="create-doplet",
+                target_type="doplet",
+                target_id="1",
+            )
+            self.assertTrue(results[0]["ok"])
+            self.assertTrue(results[0]["dry_run"])
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

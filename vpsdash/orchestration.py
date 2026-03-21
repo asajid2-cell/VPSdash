@@ -545,6 +545,7 @@ def doplet_create_plan(host: dict[str, Any], doplet: dict[str, Any], image: dict
     run_mode = _run_mode_for_host(host)
     storage_backend = doplet.get("storage_backend") or host.get("primary_storage_backend") or "files"
     slug = doplet["slug"]
+    current_status = str(doplet.get("status") or "draft").strip().lower()
     disk_gb = int(doplet.get("disk_gb") or 20)
     vcpu = int(doplet.get("vcpu") or 1)
     ram_mb = int(doplet.get("ram_mb") or 1024)
@@ -609,24 +610,47 @@ def doplet_create_plan(host: dict[str, Any], doplet: dict[str, Any], image: dict
     seed_iso = _seed_iso_path(host, slug)
     steps = [
         *image_steps,
-        volume_step,
-        *population_steps,
-        *_cloud_init_steps(host, doplet),
-        CommandStep(
-            "Define and start doplet",
-            (
-                f"virt-install --name {slug} --memory {ram_mb} --vcpus {vcpu} --import "
-                f"--disk path={disk_path},format={disk_format},bus=virtio "
-                f"--disk path={seed_iso},device=cdrom "
-                f"--network network={network_name},model=virtio --os-variant detect=on,name=linux2022 "
-                f"--console pty,target_type=serial --noautoconsole --graphics none"
-            ),
-            run_mode,
-            risky=True,
-            timeout=2400,
-            run_as_root=run_as_root,
-        ),
     ]
+    if current_status in {"draft", "queued", "provisioning", "error"}:
+        cleanup_parts = [
+            f"virsh destroy {slug} >/dev/null 2>&1 || true",
+            f"virsh undefine {slug} --nvram --remove-all-storage >/dev/null 2>&1 || true",
+            f"rm -rf {_seed_dir(host, slug)}",
+            f"rm -f {seed_iso}",
+        ]
+        if storage_backend == "files":
+            cleanup_parts.extend([f"rm -f {disk_path}", f"mkdir -p {_instance_root(host, slug)}"])
+        steps.append(
+            CommandStep(
+                "Clear stale Doplet runtime artifacts",
+                " && ".join(cleanup_parts),
+                run_mode,
+                risky=True,
+                timeout=180,
+                run_as_root=run_as_root,
+            )
+        )
+    steps.extend(
+        [
+            volume_step,
+            *population_steps,
+            *_cloud_init_steps(host, doplet),
+            CommandStep(
+                "Define and start doplet",
+                (
+                    f"virt-install --name {slug} --memory {ram_mb} --vcpus {vcpu} --import "
+                    f"--disk path={disk_path},format={disk_format},bus=virtio "
+                    f"--disk path={seed_iso},device=cdrom "
+                    f"--network network={network_name},model=virtio --os-variant detect=on,name=linux2022 "
+                    f"--console pty,target_type=serial --noautoconsole --graphics none"
+                ),
+                run_mode,
+                risky=True,
+                timeout=2400,
+                run_as_root=run_as_root,
+            ),
+        ]
+    )
     steps.extend(_gpu_attachment_steps(host, doplet))
     return [step.as_dict() if hasattr(step, "as_dict") else step for step in steps]
 

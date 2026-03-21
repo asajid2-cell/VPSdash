@@ -5,7 +5,9 @@ import platform
 import re
 import shlex
 import shutil
+import socket
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -116,14 +118,16 @@ def _windows_path_to_wsl_path(path: str) -> str:
 
 def _ssh_inner_command(bootstrap_user: str, primary_ip: str, *, private_key_path: str = "") -> str:
     if private_key_path:
-        safe_key = shlex.quote(private_key_path)
+        normalized_key = _windows_path_to_wsl_path(private_key_path)
+        safe_key = shlex.quote(normalized_key)
         user_host = shlex.quote(f"{bootstrap_user}@{primary_ip}")
+        safe_bootstrap_user = re.sub(r"[^A-Za-z0-9_.-]+", "-", bootstrap_user or "user")
+        staged_key = f'"$HOME/.ssh/vpsdash-{safe_bootstrap_user}-key"'
         return (
-            f'tmp_key="$(mktemp /tmp/vpsdash-key-XXXXXX)" && '
-            f'cp {safe_key} "$tmp_key" && chmod 600 "$tmp_key" && '
-            f'trap \'rm -f "$tmp_key"\' EXIT && '
+            'mkdir -p "$HOME/.ssh" && '
+            f'install -m 600 -- {safe_key} {staged_key} && '
             f'ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=12 '
-            f'-o IdentitiesOnly=yes -i "$tmp_key" {user_host}'
+            f'-o IdentitiesOnly=yes -i {staged_key} {user_host}'
         )
     parts = [
         "ssh",
@@ -136,6 +140,24 @@ def _ssh_inner_command(bootstrap_user: str, primary_ip: str, *, private_key_path
         parts.extend(["-o", "IdentitiesOnly=yes", "-i", private_key_path])
     parts.append(f"{bootstrap_user}@{primary_ip}")
     return " ".join(shlex.quote(part) for part in parts)
+
+
+def _windows_native_ssh_command(bootstrap_user: str, host: str, port: int, *, private_key_path: str = "") -> str:
+    parts = [
+        "ssh",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
+        "ConnectTimeout=12",
+        "-o",
+        "IdentitiesOnly=yes",
+        "-p",
+        str(int(port)),
+    ]
+    if private_key_path:
+        parts.extend(["-i", private_key_path])
+    parts.append(f"{bootstrap_user}@{host}")
+    return subprocess.list2cmdline(parts)
 
 
 def _wrap_root_shell_command(command: str) -> str:
@@ -310,7 +332,186 @@ def _discover_doplet_ip_addresses(host: dict[str, Any], slug: str) -> list[str]:
     return _extract_ipv4_addresses(str(result.get("stdout") or ""))
 
 
-def describe_doplet_terminal(host: dict[str, Any], doplet: dict[str, Any]) -> dict[str, Any]:
+def _guest_ssh_is_reachable(host: dict[str, Any], ip_address: str) -> bool:
+    ip_address = str(ip_address or "").strip()
+    if not ip_address:
+        return False
+    command = (
+        "python3 -c "
+        + shlex.quote(
+            "import socket,sys; "
+            f"s=socket.socket(); s.settimeout(2); "
+            f"rc=s.connect_ex(({ip_address!r}, 22)); "
+            "s.close(); "
+            "sys.exit(0 if rc == 0 else 1)"
+        )
+    )
+    if is_remote_mode(host):
+        result = run_remote_command(host, command, timeout=8, run_as_root=False)
+    else:
+        result = run_host_local_command(host, command, timeout=8, run_as_root=False)
+    return bool(result.get("ok"))
+
+
+def _run_virsh_probe(host: dict[str, Any], command: str, *, timeout: int = 15) -> dict[str, Any]:
+    if is_remote_mode(host):
+        result = run_remote_command(host, command, timeout=timeout, run_as_root=False)
+        if not result.get("ok") and not str(result.get("stdout") or "").strip():
+            result = run_remote_command(host, command, timeout=timeout, run_as_root=True)
+        return result
+    result = run_host_local_command(host, command, timeout=timeout, run_as_root=False)
+    if not result.get("ok") and not str(result.get("stdout") or "").strip():
+        result = run_host_local_command(host, command, timeout=timeout, run_as_root=True)
+    return result
+
+
+def _normalize_doplet_runtime_status(raw_state: str, current_status: str) -> str:
+    state = str(raw_state or "").strip().lower()
+    if not state:
+        return "missing" if current_status not in {"draft", "planned", "deleted"} else current_status
+    if "shut off" in state or "shutoff" in state:
+        return "stopped"
+    if "running" in state or "idle" in state or "in shutdown" in state or "blocked" in state:
+        return "running"
+    if "paused" in state or "suspended" in state:
+        return "paused"
+    if "crashed" in state:
+        return "error"
+    return current_status or state
+
+
+def inspect_doplet_runtime(host: dict[str, Any], doplet: dict[str, Any]) -> dict[str, Any]:
+    slug = str(doplet.get("slug") or "").strip()
+    current_status = str(doplet.get("status") or "").strip().lower()
+    if not slug:
+        return {
+            "exists": False,
+            "raw_state": "",
+            "status": current_status or "draft",
+            "ip_addresses": [str(item).strip() for item in doplet.get("ip_addresses") or [] if str(item).strip()],
+        }
+    result = _run_virsh_probe(host, f"virsh domstate {shlex.quote(slug)} 2>/dev/null || true", timeout=15)
+    raw_state = str(result.get("stdout") or "").strip()
+    status = _normalize_doplet_runtime_status(raw_state, current_status)
+    ip_addresses: list[str] = []
+    if raw_state and status in {"running", "paused"}:
+        try:
+            ip_addresses = _discover_doplet_ip_addresses(host, slug)
+        except Exception:
+            ip_addresses = []
+    return {
+        "exists": bool(raw_state),
+        "raw_state": raw_state,
+        "status": status,
+        "ip_addresses": ip_addresses,
+    }
+
+
+def _windows_local_proxy_port(doplet: dict[str, Any]) -> int:
+    doplet_id = int(doplet.get("id") or 0)
+    base_port = 22000 + doplet_id
+    if 22000 <= base_port <= 65000:
+        return base_port
+    slug = str(doplet.get("slug") or "doplet")
+    return 24000 + (sum(ord(ch) for ch in slug) % 30000)
+
+
+def _windows_local_proxy_is_ready(host: dict[str, Any], port: int) -> bool:
+    command = (
+        "python3 -c "
+        + shlex.quote(
+            "import socket,sys; "
+            f"s=socket.socket(); s.settimeout(1); "
+            f"rc=s.connect_ex(('127.0.0.1', {int(port)})); "
+            "s.close(); "
+            "sys.exit(0 if rc == 0 else 1)"
+        )
+    )
+    result = run_host_local_command(host, command, timeout=5, run_as_root=False)
+    return bool(result.get("ok"))
+
+
+def _windows_local_native_port_is_ready(port: int) -> bool:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(0.5)
+    try:
+        return sock.connect_ex(("127.0.0.1", int(port))) == 0
+    finally:
+        sock.close()
+
+
+def _ensure_windows_local_ssh_proxy(host: dict[str, Any], doplet: dict[str, Any], primary_ip: str) -> int:
+    port = _windows_local_proxy_port(doplet)
+    if _windows_local_proxy_is_ready(host, port) and _windows_local_native_port_is_ready(port):
+        return port
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(doplet.get("slug") or "doplet")) or "doplet"
+    runtime_root = "/tmp/vpsdash-ssh-proxy"
+    script_path = f"{runtime_root}/{slug}-{port}.py"
+    log_path = f"{runtime_root}/{slug}-{port}.log"
+    pid_path = f"{runtime_root}/{slug}-{port}.pid"
+    proxy_script = "\n".join(
+        [
+            "import socket, threading",
+            f"LISTEN=('0.0.0.0', {int(port)})",
+            f"TARGET=({primary_ip!r}, 22)",
+            "server=socket.socket(socket.AF_INET, socket.SOCK_STREAM)",
+            "server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)",
+            "server.bind(LISTEN)",
+            "server.listen(16)",
+            "def pipe(src, dst):",
+            "    try:",
+            "        while True:",
+            "            data = src.recv(65536)",
+            "            if not data:",
+            "                break",
+            "            dst.sendall(data)",
+            "    except Exception:",
+            "        pass",
+            "    finally:",
+            "        try: src.close()",
+            "        except Exception: pass",
+            "        try: dst.close()",
+            "        except Exception: pass",
+            "while True:",
+            "    client, _ = server.accept()",
+            "    upstream = socket.create_connection(TARGET, timeout=10)",
+            "    threading.Thread(target=pipe, args=(client, upstream), daemon=True).start()",
+            "    threading.Thread(target=pipe, args=(upstream, client), daemon=True).start()",
+        ]
+    )
+    script_literal = shlex.quote(proxy_script)
+    command = "\n".join(
+        [
+            f"mkdir -p {shlex.quote(runtime_root)}",
+            f"if [ -f {shlex.quote(pid_path)} ]; then",
+            f"  pid=$(cat {shlex.quote(pid_path)} 2>/dev/null || true)",
+            f"  if [ -n \"$pid\" ] && kill -0 \"$pid\" 2>/dev/null; then kill \"$pid\" 2>/dev/null || true; fi",
+            f"  rm -f {shlex.quote(pid_path)}",
+            "fi",
+            f"cat > {shlex.quote(script_path)} <<'PY'\n{proxy_script}\nPY",
+            f"nohup python3 {shlex.quote(script_path)} > {shlex.quote(log_path)} 2>&1 < /dev/null &",
+            f"echo $! > {shlex.quote(pid_path)}",
+        ]
+    )
+    run_host_local_command(host, command, timeout=8, run_as_root=False)
+    for _ in range(16):
+        time.sleep(0.25)
+        if _windows_local_proxy_is_ready(host, port) and _windows_local_native_port_is_ready(port):
+            return port
+    wsl_log = run_host_local_command(host, f"tail -n 40 {shlex.quote(log_path)} 2>/dev/null || true", timeout=5, run_as_root=False)
+    detail = str(wsl_log.get("stdout") or wsl_log.get("stderr") or "").strip()
+    raise RuntimeError(
+        f"Could not start the Windows-local SSH bridge for {primary_ip}:22."
+        + (f"\n\nBridge log:\n{detail}" if detail else "")
+    )
+
+
+def describe_doplet_terminal(
+    host: dict[str, Any],
+    doplet: dict[str, Any],
+    *,
+    establish_localhost_endpoint: bool = True,
+) -> dict[str, Any]:
     host_mode = _host_mode(host)
     slug = str(doplet.get("slug") or "").strip()
     if not slug:
@@ -321,11 +522,13 @@ def describe_doplet_terminal(host: dict[str, Any], doplet: dict[str, Any]) -> di
     bootstrap_user = str(doplet.get("bootstrap_user") or "ubuntu").strip() or "ubuntu"
     metadata = dict(doplet.get("metadata_json") or {})
     ip_addresses = [str(item).strip() for item in doplet.get("ip_addresses") or [] if str(item).strip()]
-    if not ip_addresses and status not in {"draft", "planned", "deleted"}:
+    if status not in {"draft", "planned", "deleted"}:
         try:
-            ip_addresses = _discover_doplet_ip_addresses(host, slug)
+            discovered_ips = _discover_doplet_ip_addresses(host, slug)
         except Exception:
-            ip_addresses = []
+            discovered_ips = []
+        if discovered_ips:
+            ip_addresses = discovered_ips
     primary_ip = ip_addresses[0] if ip_addresses else ""
     if status in {"draft", "planned"}:
         return {
@@ -371,27 +574,86 @@ def describe_doplet_terminal(host: dict[str, Any], doplet: dict[str, Any]) -> di
         }
 
     if host_mode in WINDOWS_LOCAL_MODES:
-        local_private_key_path = _windows_path_to_wsl_path(str(metadata.get("local_private_key_path") or "").strip())
+        local_private_key_path = str(metadata.get("local_private_key_path") or "").strip()
         access_note = ""
         if primary_ip.startswith("192.168.122.") or primary_ip.startswith("192.168.124."):
-            access_note = "This guest IP is on the WSL/libvirt network. Use Open Terminal or the copied WSL command instead of native Windows PowerShell SSH."
-        if primary_ip:
-            inner_command = _ssh_inner_command(bootstrap_user, primary_ip, private_key_path=local_private_key_path)
-            preview_command = build_wsl_command(host, inner_command)
+            access_note = "This guest IP is on the WSL/libvirt network. VPSdash will prefer a localhost SSH endpoint and fall back to the selected local WSL runtime if needed."
+        ssh_ready = _guest_ssh_is_reachable(host, primary_ip) if primary_ip else False
+        if primary_ip and ssh_ready:
+            if establish_localhost_endpoint:
+                try:
+                    proxy_port = _ensure_windows_local_ssh_proxy(host, doplet, primary_ip)
+                except Exception as exc:
+                    inner_command = _ssh_inner_command(
+                        bootstrap_user,
+                        primary_ip,
+                        private_key_path=local_private_key_path,
+                    )
+                    preview_command = build_wsl_command(host, inner_command)
+                    metadata["access_bridge_error"] = str(exc)
+                    return {
+                        "supported": True,
+                        "transport": "ssh",
+                        "launcher": "windows-wsl",
+                        "title": f"{name} terminal",
+                        "target": primary_ip,
+                        "preview_command": preview_command,
+                        "bootstrap_user": bootstrap_user,
+                        "ip_addresses": ip_addresses,
+                        "wsl_distribution": distro,
+                        "reason": "",
+                        "inner_command": inner_command,
+                        "access_label": f"WSL SSH {bootstrap_user}@{primary_ip}",
+                        "access_note": (access_note + " " if access_note else "") + "Localhost SSH endpoint is unavailable right now, so VPSdash is using direct WSL SSH.",
+                        "status": status,
+                    }
+            else:
+                proxy_port = _windows_local_proxy_port(doplet)
+                if not (_windows_local_proxy_is_ready(host, proxy_port) and _windows_local_native_port_is_ready(proxy_port)):
+                    inner_command = _ssh_inner_command(
+                        bootstrap_user,
+                        primary_ip,
+                        private_key_path=local_private_key_path,
+                    )
+                    preview_command = build_wsl_command(host, inner_command)
+                    return {
+                        "supported": True,
+                        "transport": "ssh",
+                        "launcher": "windows-wsl",
+                        "title": f"{name} terminal",
+                        "target": primary_ip,
+                        "preview_command": preview_command,
+                        "bootstrap_user": bootstrap_user,
+                        "ip_addresses": ip_addresses,
+                        "wsl_distribution": distro,
+                        "reason": "",
+                        "inner_command": inner_command,
+                        "access_label": f"WSL SSH {bootstrap_user}@{primary_ip}",
+                        "access_note": (access_note + " " if access_note else "") + "Use Open Terminal to let VPSdash try a localhost endpoint, or run the WSL SSH command directly.",
+                        "status": status,
+                    }
+            preview_command = _windows_native_ssh_command(
+                bootstrap_user,
+                "127.0.0.1",
+                proxy_port,
+                private_key_path=local_private_key_path,
+            )
             return {
                 "supported": True,
                 "transport": "ssh",
-                "launcher": "windows-wsl",
+                "launcher": "windows-native-ssh",
                 "title": f"{name} terminal",
-                "target": primary_ip,
+                "target": "127.0.0.1",
                 "preview_command": preview_command,
                 "bootstrap_user": bootstrap_user,
                 "ip_addresses": ip_addresses,
                 "wsl_distribution": distro,
                 "reason": "",
-                "inner_command": inner_command,
-                "access_label": f"SSH {bootstrap_user}@{primary_ip}",
-                "access_note": access_note,
+                "inner_command": preview_command,
+                "access_label": f"SSH {bootstrap_user}@127.0.0.1:{proxy_port}",
+                "access_note": (access_note + " " if access_note else "") + f"Forwarded to guest IP {primary_ip}:22 from the selected WSL runtime.",
+                "forward_host": "127.0.0.1",
+                "forward_port": proxy_port,
                 "status": status,
             }
         inner_command = f"virsh console {slug}"
@@ -410,12 +672,17 @@ def describe_doplet_terminal(host: dict[str, Any], doplet: dict[str, Any]) -> di
             "inner_command": inner_command,
             "requires_root": True,
             "access_label": f"Console {slug} via local WSL",
-            "access_note": "No guest IP has been detected yet. Open the serial console until cloud-init networking and SSH are ready.",
+            "access_note": (
+                f"Guest IPs detected: {', '.join(ip_addresses)}. SSH is not reachable from the selected WSL runtime yet, so VPSdash is opening the serial console."
+                if primary_ip
+                else "No guest IP has been detected yet. Open the serial console until cloud-init networking and SSH are ready."
+            ),
             "status": status,
         }
 
     if host_mode in LINUX_LOCAL_MODES:
-        if primary_ip:
+        ssh_ready = _guest_ssh_is_reachable(host, primary_ip) if primary_ip else False
+        if primary_ip and ssh_ready:
             inner_command = f"ssh -o StrictHostKeyChecking=accept-new {bootstrap_user}@{primary_ip}"
             return {
                 "supported": True,
@@ -447,6 +714,11 @@ def describe_doplet_terminal(host: dict[str, Any], doplet: dict[str, Any]) -> di
             "inner_command": inner_command,
             "requires_root": True,
             "access_label": f"Console {slug} on local hypervisor",
+            "access_note": (
+                f"Guest IPs detected: {', '.join(ip_addresses)}. SSH is not reachable from the local hypervisor yet, so VPSdash is opening the serial console."
+                if primary_ip
+                else ""
+            ),
             "status": status,
         }
 
@@ -487,6 +759,19 @@ def _launch_windows_terminal(host: dict[str, Any], inner_command: str, *, title:
     )
 
 
+def _launch_windows_native_ssh_terminal(command: str, *, title: str) -> None:
+    session_command = (
+        f'$Host.UI.RawUI.WindowTitle = "{title.replace(chr(34), "")}"; '
+        f"{command}; "
+        'Write-Host ""; '
+        'Read-Host "Press Enter to close"'
+    )
+    kwargs: dict[str, Any] = {}
+    if platform.system().lower().startswith("win"):
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+    subprocess.Popen(["powershell.exe", "-NoExit", "-Command", session_command], **kwargs)
+
+
 def _launch_linux_terminal(inner_command: str, *, title: str) -> None:
     session_command = _bash_session_command(inner_command, banner=title)
     terminal_variants = [
@@ -503,7 +788,7 @@ def _launch_linux_terminal(inner_command: str, *, title: str) -> None:
 
 
 def open_doplet_terminal(host: dict[str, Any], doplet: dict[str, Any]) -> dict[str, Any]:
-    details = describe_doplet_terminal(host, doplet)
+    details = describe_doplet_terminal(host, doplet, establish_localhost_endpoint=True)
     if not details.get("supported"):
         raise ValueError(details.get("reason") or "Terminal launch is not supported for this host.")
     inner_command = str(details.get("inner_command") or "").strip()
@@ -521,6 +806,8 @@ def open_doplet_terminal(host: dict[str, Any], doplet: dict[str, Any]) -> dict[s
     try:
         if launcher == "windows-wsl":
             _launch_windows_terminal(host, inner_command, title=title, as_root=bool(details.get("requires_root")))
+        elif launcher == "windows-native-ssh":
+            _launch_windows_native_ssh_terminal(inner_command, title=title)
         elif launcher == "linux-local":
             _launch_linux_terminal(inner_command, title=title)
         else:

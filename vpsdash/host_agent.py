@@ -49,6 +49,8 @@ class HostAgentRuntime:
             "python - <<'PY'",
             "python3 - <<'PY'",
             "virt-install ",
+            "virsh destroy ",
+            "virsh undefine ",
             "virsh attach-device ",
             "sudo sh -c ",
         ),

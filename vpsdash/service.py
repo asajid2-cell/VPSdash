@@ -456,8 +456,8 @@ class VpsDashService:
     def open_doplet_terminal(self, doplet_id: int, *, actor: str = "system") -> dict[str, Any]:
         return self.platform.open_doplet_terminal(doplet_id, actor=actor)
 
-    def describe_doplet_terminal(self, doplet_id: int) -> dict[str, Any]:
-        return self.platform.describe_doplet_terminal(doplet_id)
+    def describe_doplet_terminal(self, doplet_id: int, *, establish_localhost_endpoint: bool = True) -> dict[str, Any]:
+        return self.platform.describe_doplet_terminal(doplet_id, establish_localhost_endpoint=establish_localhost_endpoint)
 
     def queue_doplet_resize(self, doplet_id: int, payload: dict[str, Any] | None = None, *, actor: str = "system") -> dict[str, Any]:
         return self.platform.queue_resize_doplet(doplet_id, payload or {}, actor=actor)

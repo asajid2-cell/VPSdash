@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import html
+import hashlib
 import json
 import os
 import sys
@@ -37,6 +38,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTextBrowser,
+    QTextEdit,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -54,6 +56,7 @@ from .execution import run_local_command
 
 ACTIVE_PLATFORM_TASK_STATUSES = {"planned", "queued", "running", "cancel-requested"}
 RETRYABLE_PLATFORM_TASK_STATUSES = {"failed", "cancelled"}
+ARCHIVED_PLATFORM_TASK_STATUSES = {"cancelled", "complete", "completed"}
 
 
 def _project_root() -> Path:
@@ -467,6 +470,7 @@ class VpsDashWindow(QMainWindow):
         self._layout_audit_timer.setSingleShot(True)
         self._layout_audit_timer.timeout.connect(self._run_layout_audit)
         self._last_layout_issues: list[str] = []
+        self._error_events: list[str] = []
         self._bootstrap_poll_inflight = False
         self._watched_task_roots: set[int] = set()
         self._auto_retry_attempts: dict[int, int] = {}
@@ -640,14 +644,15 @@ class VpsDashWindow(QMainWindow):
         nav_box = QFrame()
         nav_box.setObjectName("SidebarNavBox")
         nav_layout = QVBoxLayout(nav_box)
-        nav_layout.setContentsMargins(0, 0, 0, 0)
-        nav_layout.setSpacing(8)
+        nav_layout.setContentsMargins(4, 0, 4, 6)
+        nav_layout.setSpacing(12)
         for index, label in enumerate(self.PAGE_LABELS):
             button = make_nav_button(label)
             button.clicked.connect(lambda _checked=False, idx=index: self._switch_page(idx))
             nav_layout.addWidget(button)
             self.nav_buttons.append(button)
         layout.addWidget(nav_box)
+        layout.addSpacing(10)
 
         tools_label = QLabel("QUICK ACTIONS")
         tools_label.setProperty("class", "SidebarSection")
@@ -656,8 +661,8 @@ class VpsDashWindow(QMainWindow):
         tools = QFrame()
         tools.setObjectName("SidebarToolsCard")
         tools_layout = QVBoxLayout(tools)
-        tools_layout.setContentsMargins(16, 16, 16, 16)
-        tools_layout.setSpacing(14)
+        tools_layout.setContentsMargins(18, 18, 18, 18)
+        tools_layout.setSpacing(16)
 
         initial_setup = make_button("Initial Setup", "primary")
         initial_setup.clicked.connect(self._run_initial_setup)
@@ -2119,7 +2124,22 @@ class VpsDashWindow(QMainWindow):
         self.native_task_detail.setPlainText("Select a task to inspect it.")
         native_detail_layout.addWidget(self.native_task_detail, 1)
 
-        self.native_platform_cards = [native_tasks_card, native_assets_card, native_detail_card]
+        native_history_card = card_frame()
+        native_history_layout = QVBoxLayout(native_history_card)
+        native_history_layout.setContentsMargins(22, 22, 22, 22)
+        native_history_layout.setSpacing(12)
+        native_history_layout.addWidget(make_card_title("Task history"))
+        native_history_layout.addWidget(
+            make_helper_text("Completed and cancelled control-plane work is moved here so the active task center stays focused on live operations.")
+        )
+        self.native_task_history = QTextBrowser()
+        self.native_task_history.setMinimumHeight(220)
+        self.native_task_history.setProperty("output", True)
+        self.native_task_history.setOpenExternalLinks(False)
+        self.native_task_history.setPlainText("No archived task history yet.")
+        native_history_layout.addWidget(self.native_task_history, 1)
+
+        self.native_platform_cards = [native_tasks_card, native_assets_card, native_detail_card, native_history_card]
         self._reflow_grid(native_grid, self.native_platform_cards, columns=2)
         layout.addLayout(native_grid)
 
@@ -2135,6 +2155,11 @@ class VpsDashWindow(QMainWindow):
             "Snapshot",
             "Memory, listeners, running containers, and quick host telemetry appear here.",
         )
+        self.error_output = self._output_card(
+            "Error console",
+            "Native operation failures, task errors, and stack traces appear here so you can inspect why a Doplet or host action failed.",
+        )
+        self.error_output["output"].setPlainText("No errors logged yet.")
         self.execution_output = self._output_card(
             "Execution log",
             "Dry runs and live runs stream their command-by-command results here.",
@@ -2142,11 +2167,13 @@ class VpsDashWindow(QMainWindow):
         self.operations_grid_cards = [
             self.diagnostics_output["frame"],
             self.monitor_output["frame"],
+            self.error_output["frame"],
             self.execution_output["frame"],
         ]
         grid.addWidget(self.diagnostics_output["frame"], 0, 0)
         grid.addWidget(self.monitor_output["frame"], 0, 1)
-        grid.addWidget(self.execution_output["frame"], 1, 0, 1, 2)
+        grid.addWidget(self.error_output["frame"], 1, 0)
+        grid.addWidget(self.execution_output["frame"], 1, 1)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
         grid.setRowStretch(1, 1)
@@ -2247,6 +2274,8 @@ class VpsDashWindow(QMainWindow):
         output.setMinimumHeight(180)
         output.setProperty("output", True)
         output.setOpenExternalLinks(False)
+        output.setLineWrapMode(QTextEdit.WidgetWidth)
+        output.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         output.setPlainText("No run yet.")
         _style_refresh(output)
         layout.addWidget(output, 1)
@@ -2419,21 +2448,23 @@ class VpsDashWindow(QMainWindow):
             if operations_width >= 1160:
                 self.operations_grid.addWidget(self.operations_grid_cards[0], 0, 0)
                 self.operations_grid.addWidget(self.operations_grid_cards[1], 0, 1)
-                self.operations_grid.addWidget(self.operations_grid_cards[2], 1, 0, 1, 2)
+                self.operations_grid.addWidget(self.operations_grid_cards[2], 1, 0)
+                self.operations_grid.addWidget(self.operations_grid_cards[3], 1, 1)
                 self.operations_grid.setColumnStretch(0, 1)
                 self.operations_grid.setColumnStretch(1, 1)
                 self.operations_grid.setRowStretch(0, 0)
                 self.operations_grid.setRowStretch(1, 1)
-                self.operations_grid.setRowStretch(2, 0)
             else:
                 self.operations_grid.addWidget(self.operations_grid_cards[0], 0, 0)
                 self.operations_grid.addWidget(self.operations_grid_cards[1], 1, 0)
                 self.operations_grid.addWidget(self.operations_grid_cards[2], 2, 0)
+                self.operations_grid.addWidget(self.operations_grid_cards[3], 3, 0)
                 self.operations_grid.setColumnStretch(0, 1)
                 self.operations_grid.setColumnStretch(1, 0)
                 self.operations_grid.setRowStretch(0, 0)
                 self.operations_grid.setRowStretch(1, 0)
-                self.operations_grid.setRowStretch(2, 1)
+                self.operations_grid.setRowStretch(2, 0)
+                self.operations_grid.setRowStretch(3, 1)
         self._schedule_layout_audit()
 
     def resizeEvent(self, event: QEvent) -> None:
@@ -2575,10 +2606,13 @@ class VpsDashWindow(QMainWindow):
             self._watched_task_roots.difference_update(finished_roots)
 
         if active_watched or retryable_watched or self._bootstrap_poll_inflight:
+            self._task_poll_timer.setInterval(1600)
             if not self._task_poll_timer.isActive():
                 self._task_poll_timer.start()
         else:
-            self._task_poll_timer.stop()
+            self._task_poll_timer.setInterval(9000)
+            if not self._task_poll_timer.isActive():
+                self._task_poll_timer.start()
 
     def _maybe_auto_retry_watched_tasks(self) -> None:
         if not hasattr(self, "bootstrap_data") or not self.native_task_auto_retry.isChecked():
@@ -2852,7 +2886,7 @@ class VpsDashWindow(QMainWindow):
             selected_task_id = self._selected_native_task_id()
             self.native_task_tree.blockSignals(True)
             self.native_task_tree.clear()
-            for task in control_plane.get("tasks", []):
+            for task in self._active_control_plane_tasks():
                 item = QTreeWidgetItem(
                     [
                         task.get("task_type", "task"),
@@ -2866,7 +2900,20 @@ class VpsDashWindow(QMainWindow):
                 if selected_task_id and int(task.get("id", 0)) == selected_task_id:
                     self.native_task_tree.setCurrentItem(item)
             self.native_task_tree.blockSignals(False)
+            if self.native_task_tree.currentItem() is None and self.native_task_tree.topLevelItemCount():
+                self.native_task_tree.setCurrentItem(self.native_task_tree.topLevelItem(0))
             self._native_task_selection_changed()
+
+        if hasattr(self, "native_task_history"):
+            history_lines: list[str] = []
+            for task in self._archived_control_plane_tasks()[:20]:
+                updated = str(task.get("updated_at") or task.get("created_at") or "").replace("T", " ")
+                history_lines.append(
+                    f"{task.get('task_type', 'task')} | {task.get('status', 'unknown')} | "
+                    f"{task.get('target_type', '')} {task.get('target_id', '')}".strip() + (f" | {updated}" if updated else "")
+                )
+            self.native_task_history.setPlainText("\n".join(history_lines) if history_lines else "No archived task history yet.")
+        self._refresh_error_console()
 
         if hasattr(self, "native_asset_tree"):
             self.native_asset_tree.clear()
@@ -3015,6 +3062,67 @@ class VpsDashWindow(QMainWindow):
     def _control_plane_flavors(self) -> list[dict[str, Any]]:
         return list((self.bootstrap_data.get("control_plane", {}) if hasattr(self, "bootstrap_data") else {}).get("flavors", []))
 
+    def _active_control_plane_tasks(self) -> list[dict[str, Any]]:
+        tasks = list((self.bootstrap_data.get("control_plane", {}) if hasattr(self, "bootstrap_data") else {}).get("tasks", []))
+        active: list[dict[str, Any]] = []
+        for task in tasks:
+            status = str(task.get("status") or "").strip().lower()
+            task_id = int(task.get("id", 0) or 0)
+            root_id = self._task_root_id(task, {int(item.get("id", 0) or 0): item for item in tasks if int(item.get("id", 0) or 0)})
+            if status in ARCHIVED_PLATFORM_TASK_STATUSES and root_id not in self._watched_task_roots and task_id not in self._watched_task_roots:
+                continue
+            active.append(task)
+        return active
+
+    def _archived_control_plane_tasks(self) -> list[dict[str, Any]]:
+        tasks = list((self.bootstrap_data.get("control_plane", {}) if hasattr(self, "bootstrap_data") else {}).get("tasks", []))
+        archived: list[dict[str, Any]] = []
+        task_map = {int(item.get("id", 0) or 0): item for item in tasks if int(item.get("id", 0) or 0)}
+        for task in tasks:
+            status = str(task.get("status") or "").strip().lower()
+            if status not in ARCHIVED_PLATFORM_TASK_STATUSES:
+                continue
+            root_id = self._task_root_id(task, task_map)
+            if root_id in self._watched_task_roots or int(task.get("id", 0) or 0) in self._watched_task_roots:
+                continue
+            archived.append(task)
+        return archived
+
+    def _failing_control_plane_tasks(self) -> list[dict[str, Any]]:
+        tasks = list((self.bootstrap_data.get("control_plane", {}) if hasattr(self, "bootstrap_data") else {}).get("tasks", []))
+        failing = [dict(task) for task in tasks if str(task.get("status") or "").strip().lower() in {"failed", "cancelled"}]
+        failing.sort(key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""), reverse=True)
+        return failing
+
+    def _task_error_entry(self, task: dict[str, Any]) -> str:
+        timestamp = str(task.get("updated_at") or task.get("created_at") or "").replace("T", " ")
+        task_id = int(task.get("id", 0) or 0)
+        task_type = str(task.get("task_type") or "task")
+        status = str(task.get("status") or "unknown").upper()
+        target = f"{task.get('target_type', '')} {task.get('target_id', '')}".strip() or "unscoped target"
+        payload = dict(task.get("result_payload") or {})
+        error_text = str(payload.get("error") or "").strip()
+        log_output = str(task.get("log_output") or "").strip()
+        sections = [
+            f"[{timestamp}] Task {task_id} {task_type} {status}",
+            f"Target: {target}",
+        ]
+        if error_text:
+            sections.append(f"Error: {error_text}")
+        if log_output:
+            sections.extend(["", log_output])
+        return "\n".join(section for section in sections if section is not None)
+
+    def _refresh_error_console(self) -> None:
+        if not hasattr(self, "error_output"):
+            return
+        task_entries = [self._task_error_entry(task) for task in self._failing_control_plane_tasks()[:12]]
+        entries = list(self._error_events) + task_entries
+        if not entries:
+            self.error_output["output"].setPlainText("No errors logged yet.")
+            return
+        self.error_output["output"].setPlainText(("\n\n" + ("-" * 72) + "\n\n").join(entries))
+
     def _selected_platform_host_id(self) -> int | None:
         if not hasattr(self, "native_hosts_tree"):
             return None
@@ -3092,7 +3200,7 @@ class VpsDashWindow(QMainWindow):
             return
         host = next((item for item in self._local_control_plane_hosts() if int(item.get("id", 0)) == int(doplet.get("host_id", 0))), {})
         try:
-            terminal = self.service.describe_doplet_terminal(int(doplet["id"]))
+            terminal = self.service.describe_doplet_terminal(int(doplet["id"]), establish_localhost_endpoint=False)
         except Exception as exc:
             terminal = {"supported": False, "reason": str(exc), "transport": "", "target": "", "preview_command": ""}
         detail = {
@@ -3148,7 +3256,7 @@ class VpsDashWindow(QMainWindow):
         host = next((item for item in self._control_plane_hosts() if int(item.get("id", 0)) == int(doplet.get("host_id", 0))), {})
         image = next((item for item in self._control_plane_images() if int(item.get("id", 0)) == int(doplet.get("image_id", 0))), {})
         try:
-            terminal = self.service.describe_doplet_terminal(int(doplet["id"]))
+            terminal = self.service.describe_doplet_terminal(int(doplet["id"]), establish_localhost_endpoint=False)
         except Exception as exc:
             terminal = {"supported": False, "reason": str(exc), "transport": "", "target": "", "preview_command": ""}
         summary = {
@@ -3294,18 +3402,41 @@ class VpsDashWindow(QMainWindow):
         doplet_id = self._selected_native_doplet_id()
         if not doplet_id:
             raise ValueError("Choose a Doplet first.")
-        terminal = self.service.describe_doplet_terminal(doplet_id)
+        terminal = self.service.describe_doplet_terminal(doplet_id, establish_localhost_endpoint=False)
         if not terminal.get("supported"):
             raise ValueError(str(terminal.get("reason") or "Terminal is not available yet."))
         return str(terminal.get("preview_command") or "")
 
     def _ip_text_for_doplet(self, doplet_id: int) -> tuple[str, dict[str, Any]]:
-        details = self.service.describe_doplet_terminal(doplet_id)
+        details = self.service.describe_doplet_terminal(doplet_id, establish_localhost_endpoint=False)
         ips = [str(item).strip() for item in details.get("ip_addresses") or [] if str(item).strip()]
-        if not ips:
+        if not ips and not str(details.get("forward_host") or "").strip():
             raise ValueError(str(details.get("reason") or "No guest IP has been detected yet."))
+        lines: list[str] = []
+        if ips:
+            lines.append("Guest IPs:")
+            lines.extend(ips)
+        forward_host = str(details.get("forward_host") or "").strip()
+        forward_port = str(details.get("forward_port") or "").strip()
+        if forward_host and forward_port:
+            if lines:
+                lines.append("")
+            lines.append("Local SSH endpoint:")
+            lines.append(f"{forward_host}:{forward_port}")
+        access_label = str(details.get("access_label") or "").strip()
+        preview_command = str(details.get("preview_command") or "").strip()
+        if access_label:
+            if lines:
+                lines.append("")
+            lines.append("Access:")
+            lines.append(access_label)
+        if preview_command:
+            if lines:
+                lines.append("")
+            lines.append("Command:")
+            lines.append(preview_command)
         note = str(details.get("access_note") or "").strip()
-        ip_text = "\n".join(ips)
+        ip_text = "\n".join(lines)
         if note:
             ip_text = f"{ip_text}\n\n{note}"
         return ip_text, details
@@ -3340,7 +3471,7 @@ class VpsDashWindow(QMainWindow):
             self._set_status("Choose a Doplet first", 3000)
             return
         try:
-            details = self.service.describe_doplet_terminal(doplet_id)
+            details = self.service.describe_doplet_terminal(doplet_id, establish_localhost_endpoint=True)
             access_label = str(details.get("access_label") or details.get("transport") or "terminal")
         except Exception:
             access_label = "terminal"
@@ -3364,7 +3495,7 @@ class VpsDashWindow(QMainWindow):
         doplet_id = self._selected_resources_doplet_id()
         if not doplet_id:
             raise ValueError("Choose a local Doplet first.")
-        terminal = self.service.describe_doplet_terminal(doplet_id)
+        terminal = self.service.describe_doplet_terminal(doplet_id, establish_localhost_endpoint=False)
         if not terminal.get("supported"):
             raise ValueError(str(terminal.get("reason") or "Terminal is not available yet."))
         return str(terminal.get("preview_command") or "")
@@ -3399,7 +3530,7 @@ class VpsDashWindow(QMainWindow):
             self._set_status("Choose a local Doplet first", 3000)
             return
         try:
-            details = self.service.describe_doplet_terminal(doplet_id)
+            details = self.service.describe_doplet_terminal(doplet_id, establish_localhost_endpoint=True)
             access_label = str(details.get("access_label") or details.get("transport") or "terminal")
         except Exception:
             access_label = "terminal"
@@ -3581,20 +3712,27 @@ class VpsDashWindow(QMainWindow):
         task = next((item for item in control_plane.get("tasks", []) if int(item.get("id", 0)) == int(task_id or 0)), None)
         if not task:
             self.native_task_detail.setPlainText("Select a task to inspect it.")
+            if hasattr(self, "execution_output"):
+                self.execution_output["output"].setPlainText("Select a task to inspect its command output.")
             self.native_task_launch_button.setEnabled(False)
             self.native_task_cancel_button.setEnabled(False)
             self.native_task_retry_button.setEnabled(False)
             return
+        payload = dict(task.get("result_payload") or {})
+        log_output = str(task.get("log_output") or "").strip()
         self.native_task_detail.setPlainText(
             json.dumps(
                 {
                     "task": task,
-                    "result_payload": task.get("result_payload") or {},
-                    "log_output": task.get("log_output", ""),
+                    "result_payload": payload,
+                    "log_output": log_output,
                 },
                 indent=2,
             )
         )
+        if hasattr(self, "execution_output"):
+            execution_text = log_output or json.dumps(payload, indent=2) or "No command output captured for this task yet."
+            self.execution_output["output"].setPlainText(execution_text)
         status = str(task.get("status") or "")
         self.native_task_launch_button.setEnabled(status not in {"running", "cancel-requested", "cancelled"})
         self.native_task_cancel_button.setEnabled(status in {"planned", "queued", "running", "cancel-requested"})
@@ -3906,20 +4044,54 @@ class VpsDashWindow(QMainWindow):
         install_command = f'"{python_bin}" -m pip install -r "{requirements}"'
         return create_command, install_command
 
+    def _project_source_setup_needs_install(self) -> dict[str, Any] | None:
+        if getattr(sys, "frozen", False):
+            return None
+        project_root = _project_root()
+        requirements = project_root / "requirements.txt"
+        if not requirements.exists():
+            return None
+        venv_dir = project_root / ".venv"
+        if os.name == "nt":
+            python_bin = venv_dir / "Scripts" / "python.exe"
+        else:
+            python_bin = venv_dir / "bin" / "python"
+        stamp_path = venv_dir / ".vpsdash_requirements.sha256"
+        requirements_hash = hashlib.sha256(requirements.read_bytes()).hexdigest()
+        return {
+            "venv_dir": venv_dir,
+            "python_bin": python_bin,
+            "stamp_path": stamp_path,
+            "requirements_hash": requirements_hash,
+            "needs_venv": not python_bin.exists(),
+            "needs_requirements": (not stamp_path.exists()) or stamp_path.read_text(encoding="utf-8").strip() != requirements_hash,
+        }
+
     def _perform_local_initial_setup(self, host_payload: dict[str, Any]) -> dict[str, Any]:
         result: dict[str, Any] = {"source_env": None, "host": None, "inventory": None, "prepare": None}
+        source_state = self._project_source_setup_needs_install()
         source_commands = self._project_source_setup_commands()
-        if source_commands:
+        if source_commands and source_state and (source_state["needs_venv"] or source_state["needs_requirements"]):
             create_command, install_command = source_commands
-            create_result = run_local_command(create_command, timeout=900)
-            if not create_result.get("ok"):
-                raise RuntimeError(create_result.get("stderr") or "Could not create the local Python virtual environment.")
-            install_result = run_local_command(install_command, timeout=1800)
-            if not install_result.get("ok"):
-                raise RuntimeError(install_result.get("stderr") or "Could not install Python requirements into the local virtual environment.")
+            if source_state["needs_venv"]:
+                create_result = run_local_command(create_command, timeout=900)
+                if not create_result.get("ok"):
+                    raise RuntimeError(create_result.get("stderr") or "Could not create the local Python virtual environment.")
+            if source_state["needs_requirements"]:
+                install_result = run_local_command(install_command, timeout=1800)
+                if not install_result.get("ok"):
+                    raise RuntimeError(install_result.get("stderr") or "Could not install Python requirements into the local virtual environment.")
+                source_state["stamp_path"].parent.mkdir(parents=True, exist_ok=True)
+                source_state["stamp_path"].write_text(source_state["requirements_hash"], encoding="utf-8")
             result["source_env"] = {
-                "venv_created": True,
-                "requirements_installed": True,
+                "venv_created": bool(source_state["needs_venv"]),
+                "requirements_installed": bool(source_state["needs_requirements"]),
+            }
+        elif source_state:
+            result["source_env"] = {
+                "venv_created": False,
+                "requirements_installed": False,
+                "skipped": True,
             }
 
         host = self.service.upsert_platform_host(host_payload, actor="desktop")
@@ -3927,10 +4099,14 @@ class VpsDashWindow(QMainWindow):
         if host_id <= 0:
             raise RuntimeError("Initial setup could not save the local host profile.")
         inventory = self.service.capture_platform_host_inventory(host_id, actor="desktop")
-        prepare = self._launch_queued_platform_task(
-            lambda: self.service.queue_prepare_platform_host(host_id, actor="desktop"),
-            actor="desktop",
-        )
+        resources = dict((inventory.get("inventory") or {}).get("resources") or {})
+        if str(inventory.get("status") or "").lower() == "ready" and bool(resources.get("virtualization_ready")):
+            prepare = {"skipped": True, "status": "ready"}
+        else:
+            prepare = self._launch_queued_platform_task(
+                lambda: self.service.queue_prepare_platform_host(host_id, actor="desktop"),
+                actor="desktop",
+            )
         result["host"] = host
         result["inventory"] = inventory
         result["prepare"] = prepare
@@ -3962,7 +4138,10 @@ class VpsDashWindow(QMainWindow):
             self._watch_platform_task(task_id)
         self._load_bootstrap()
         self._open_host_admin()
-        self._set_status("Initial setup started. VPSdash is preparing this machine for local Doplets.", 6000)
+        if prepare.get("skipped"):
+            self._set_status("Initial setup checked this machine and skipped host preparation because the local runtime already looks ready.", 7000)
+        else:
+            self._set_status("Initial setup started. VPSdash is preparing this machine for local Doplets.", 6000)
 
     def _save_host_and_open_doplet_admin(self) -> None:
         self._save_host()
@@ -5101,6 +5280,14 @@ class VpsDashWindow(QMainWindow):
             self._show_error("Web admin failed", str(exc), traceback.format_exc())
 
     def _show_error(self, title: str, message: str, details: str | None = None) -> None:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        console_entry = f"[{timestamp}] {title}\n{message}"
+        if details:
+            console_entry = f"{console_entry}\n\n{details.strip()}"
+        self._error_events.insert(0, console_entry)
+        self._error_events = self._error_events[:30]
+        self._refresh_error_console()
+        self._set_status(f"{title}. See Activity > Error console.", 6000)
         dialog = QMessageBox(self)
         dialog.setIcon(QMessageBox.Critical)
         dialog.setWindowTitle(title)

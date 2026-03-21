@@ -3,6 +3,7 @@
 import shutil
 import threading
 import secrets
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,7 +17,7 @@ from sqlalchemy.orm import Session
 from .capacity import can_allocate, capacity_summary, gpu_assignment_preflight, summarize_inventory
 from .config import PlatformConfig, load_config
 from .database import apply_schema_migrations, create_platform_engine, create_session_factory, session_scope
-from .execution import PlanCancelled, describe_doplet_terminal, open_doplet_terminal
+from .execution import PlanCancelled, describe_doplet_terminal, inspect_doplet_runtime, open_doplet_terminal
 from .host_agent import HostAgent
 from .mailer import Mailer
 from .models import (
@@ -119,6 +120,7 @@ class PlatformService:
         self._task_threads: dict[int, threading.Thread] = {}
         self._task_cancel_events: dict[int, threading.Event] = {}
         self._task_lock = threading.Lock()
+        self._last_runtime_reconcile_at = 0.0
         self._seed_defaults()
 
     def _seed_defaults(self) -> None:
@@ -198,6 +200,7 @@ class PlatformService:
         )
 
     def bootstrap(self) -> dict[str, Any]:
+        self.reconcile_runtime_state()
         with session_scope(self.session_factory) as session:
             doplet_records = session.scalars(select(Doplet).order_by(Doplet.name)).all()
             doplet_payloads = [self._doplet_payload(item) for item in doplet_records]
@@ -232,6 +235,78 @@ class PlatformService:
                 "tasks": [self._task_payload(item) for item in session.scalars(select(TaskRecord).order_by(TaskRecord.created_at.desc()).limit(25)).all()],
                 "audit": [self._audit_payload(item) for item in session.scalars(select(AuditEvent).order_by(AuditEvent.created_at.desc()).limit(25)).all()],
             }
+
+    def reconcile_runtime_state(self, *, actor: str = "system", force: bool = False) -> dict[str, Any]:
+        now_monotonic = time.monotonic()
+        if not force and (now_monotonic - self._last_runtime_reconcile_at) < 3.0:
+            return {"changed": 0, "checked": 0}
+        changed = 0
+        checked = 0
+        with session_scope(self.session_factory) as session:
+            active_doplet_ids = {
+                int(task.target_id)
+                for task in session.scalars(
+                    select(TaskRecord).where(
+                        TaskRecord.target_type == "doplet",
+                        TaskRecord.status.in_(["planned", "queued", "running", "cancel-requested"]),
+                    )
+                ).all()
+                if str(task.target_id or "").isdigit()
+            }
+            hosts = session.scalars(select(HostNode).order_by(HostNode.id)).all()
+            for host in hosts:
+                host_payload = self._host_payload(host)
+                doplets = session.scalars(select(Doplet).where(Doplet.host_id == host.id).order_by(Doplet.id)).all()
+                for doplet in doplets:
+                    if _doplet_is_deleted(doplet) or doplet.id in active_doplet_ids:
+                        continue
+                    checked += 1
+                    try:
+                        runtime = inspect_doplet_runtime(host_payload, self._doplet_payload(doplet))
+                    except Exception as exc:
+                        inventory = dict(host.inventory or {})
+                        inventory["runtime_sync_error"] = str(exc)
+                        inventory["runtime_sync_error_at"] = self._now().isoformat()
+                        host.inventory = inventory
+                        continue
+                    next_status = str(runtime.get("status") or doplet.status or "").strip().lower() or doplet.status
+                    next_ips = [str(item).strip() for item in runtime.get("ip_addresses") or [] if str(item).strip()]
+                    doplet_changed = False
+                    if next_status and next_status != str(doplet.status or "").strip().lower():
+                        doplet.status = next_status
+                        doplet_changed = True
+                    if next_status in {"stopped", "paused", "error", "missing"}:
+                        if doplet.ip_addresses:
+                            doplet.ip_addresses = []
+                            doplet_changed = True
+                    elif next_ips and next_ips != list(doplet.ip_addresses or []):
+                        doplet.ip_addresses = next_ips
+                        doplet_changed = True
+                    metadata = dict(doplet.metadata_json or {})
+                    metadata["runtime_last_seen_at"] = self._now().isoformat()
+                    metadata["runtime_raw_state"] = str(runtime.get("raw_state") or "")
+                    if next_ips:
+                        metadata["runtime_last_ip_addresses"] = next_ips
+                    elif next_status in {"stopped", "paused", "error", "missing"}:
+                        metadata["runtime_last_ip_addresses"] = []
+                    if metadata != dict(doplet.metadata_json or {}):
+                        doplet.metadata_json = metadata
+                        doplet_changed = True
+                    if doplet_changed:
+                        changed += 1
+            if changed:
+                session.add(
+                    AuditEvent(
+                        actor=actor,
+                        action="runtime.reconcile",
+                        target_type="control-plane",
+                        target_id="doplets",
+                        summary=f"Reconciled {changed} Doplet runtime records",
+                        details={"checked": checked, "changed": changed},
+                    )
+                )
+        self._last_runtime_reconcile_at = time.monotonic()
+        return {"changed": changed, "checked": checked}
 
     def list_users(self) -> list[dict[str, Any]]:
         with session_scope(self.session_factory) as session:
@@ -814,13 +889,17 @@ class PlatformService:
             )
             return details
 
-    def describe_doplet_terminal(self, doplet_id: int) -> dict[str, Any]:
+    def describe_doplet_terminal(self, doplet_id: int, *, establish_localhost_endpoint: bool = True) -> dict[str, Any]:
         with session_scope(self.session_factory) as session:
             doplet = self._load_manageable_doplet(session, doplet_id)
             host = session.get(HostNode, doplet.host_id)
             if not host:
                 raise KeyError(f"Unknown host for doplet: {doplet.host_id}")
-            details = describe_doplet_terminal(self._host_payload(host), self._doplet_payload(doplet))
+            details = describe_doplet_terminal(
+                self._host_payload(host),
+                self._doplet_payload(doplet),
+                establish_localhost_endpoint=establish_localhost_endpoint,
+            )
             self._persist_doplet_terminal_details(doplet, details)
             return details
 
@@ -828,6 +907,23 @@ class PlatformService:
         ips = [str(item).strip() for item in details.get("ip_addresses") or [] if str(item).strip()]
         if ips and ips != list(doplet.ip_addresses or []):
             doplet.ip_addresses = ips
+        metadata = dict(doplet.metadata_json or {})
+        access = dict(metadata.get("access") or {})
+        access.update(
+            {
+                "label": str(details.get("access_label") or ""),
+                "note": str(details.get("access_note") or ""),
+                "transport": str(details.get("transport") or ""),
+                "target": str(details.get("target") or ""),
+                "preview_command": str(details.get("preview_command") or ""),
+                "forward_host": str(details.get("forward_host") or ""),
+                "forward_port": int(details.get("forward_port") or 0) if str(details.get("forward_port") or "").strip() else 0,
+                "ip_addresses": ips or list(doplet.ip_addresses or []),
+                "updated_at": self._now().isoformat(),
+            }
+        )
+        metadata["access"] = access
+        doplet.metadata_json = metadata
 
     def queue_resize_doplet(self, doplet_id: int, payload: dict[str, Any], *, actor: str = "system") -> dict[str, Any]:
         with session_scope(self.session_factory) as session:

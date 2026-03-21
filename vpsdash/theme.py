@@ -360,8 +360,8 @@ QScrollArea {
 
 QScrollBar:vertical {
     background: rgba(255, 255, 255, 0.02);
-    width: 14px;
-    margin: 10px 8px 10px 18px;
+    width: 16px;
+    margin: 8px 2px 8px 10px;
     border-radius: 7px;
 }
 
