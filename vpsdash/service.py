@@ -108,7 +108,11 @@ def _list_wsl_distributions() -> list[str]:
         return []
     stdout = result.stdout if isinstance(result.stdout, bytes) else str(result.stdout or "").encode("utf-8", errors="ignore")
     decoded = ""
-    for encoding in ("utf-16", "utf-16-le", "utf-8", "cp1252"):
+    looks_utf16 = stdout.startswith((b"\xff\xfe", b"\xfe\xff")) or stdout.count(b"\x00") >= max(2, len(stdout) // 6)
+    encodings = ["utf-8", "cp1252", "cp850", "cp437"]
+    if looks_utf16:
+        encodings = ["utf-16", "utf-16-le", *encodings]
+    for encoding in encodings:
         try:
             decoded = stdout.decode(encoding).replace("\x00", "").strip()
         except UnicodeDecodeError:

@@ -76,6 +76,32 @@ def _windows_subprocess_kwargs() -> dict[str, Any]:
 
 
 def _run_windows_native_command(argv: list[str], timeout: int = 60) -> dict[str, Any]:
+    def _decode_output(raw: Any) -> str:
+        if raw is None:
+            return ""
+        if isinstance(raw, str):
+            return raw
+        if not isinstance(raw, (bytes, bytearray)):
+            return str(raw)
+        data = bytes(raw)
+        looks_utf16 = data.startswith((b"\xff\xfe", b"\xfe\xff")) or data.count(b"\x00") >= max(2, len(data) // 6)
+        if looks_utf16:
+            for encoding in ("utf-16", "utf-16-le"):
+                try:
+                    decoded = data.decode(encoding).replace("\x00", "").strip()
+                except UnicodeDecodeError:
+                    continue
+                if decoded:
+                    return decoded
+        for encoding in ("utf-8", "cp1252", "cp850", "cp437"):
+            try:
+                decoded = data.decode(encoding).replace("\x00", "").strip()
+            except UnicodeDecodeError:
+                continue
+            if decoded:
+                return decoded
+        return data.decode("utf-8", errors="replace").replace("\x00", "").strip()
+
     completed = subprocess.run(
         argv,
         capture_output=True,
@@ -86,8 +112,8 @@ def _run_windows_native_command(argv: list[str], timeout: int = 60) -> dict[str,
     return {
         "ok": completed.returncode == 0,
         "returncode": completed.returncode,
-        "stdout": completed.stdout.decode("utf-8", errors="replace"),
-        "stderr": completed.stderr.decode("utf-8", errors="replace"),
+        "stdout": _decode_output(completed.stdout),
+        "stderr": _decode_output(completed.stderr),
         "command": subprocess.list2cmdline(argv),
     }
 
@@ -2446,19 +2472,21 @@ class VpsDashWindow(QMainWindow):
     def _set_initial_setup_progress(self, percent: int, message: str) -> None:
         if not hasattr(self, "initial_setup_progress"):
             return
+        compact = self._summarize_status_message(message)
         value = max(0, min(int(percent), 100))
         self.initial_setup_progress.setValue(value)
         self.initial_setup_progress.setFormat(f"{value}%")
-        self.initial_setup_status.setText(message)
-        self.initial_setup_status.setToolTip(message)
+        self.initial_setup_status.setText(compact)
+        self.initial_setup_status.setToolTip(str(message or ""))
 
     def _reset_initial_setup_progress(self, message: str = "Initial setup has not run yet.") -> None:
         if not hasattr(self, "initial_setup_progress"):
             return
         self.initial_setup_progress.setValue(0)
         self.initial_setup_progress.setFormat("Setup idle")
-        self.initial_setup_status.setText(message)
-        self.initial_setup_status.setToolTip(message)
+        compact = self._summarize_status_message(message)
+        self.initial_setup_status.setText(compact)
+        self.initial_setup_status.setToolTip(str(message or ""))
 
     def _run_async_task(
         self,
@@ -2483,7 +2511,7 @@ class VpsDashWindow(QMainWindow):
 
         def _error(message: str, details: str) -> None:
             if on_progress is not None:
-                on_progress(0, f"{error_title}: {message}")
+                on_progress(0, f"{error_title}: inspect Activity for details.")
             self._show_error(error_title, message, details)
 
         def _finished() -> None:
@@ -4468,7 +4496,23 @@ class VpsDashWindow(QMainWindow):
         result = _run_windows_native_command(["wsl.exe", "--install", "-d", distro], timeout=2400)
         text = f"{result.get('stdout', '')}\n{result.get('stderr', '')}".lower()
         reboot_required = any(token in text for token in ("restart", "reboot", "needs to be restarted", "changes will not take effect"))
-        return {**result, "reboot_required": reboot_required}
+        install_started = any(
+            token in text
+            for token in (
+                "installing",
+                "has been installed",
+                "the operation completed successfully",
+                "changes will not be effective until the system is rebooted",
+                "wsl is already installed",
+            )
+        )
+        return {**result, "ok": bool(result.get("ok")) or install_started or reboot_required, "reboot_required": reboot_required}
+
+    def _summarize_status_message(self, message: str, limit: int = 120) -> str:
+        compact = " ".join(str(message or "").split())
+        if len(compact) > limit:
+            return compact[: limit - 3].rstrip() + "..."
+        return compact
 
     def _run_initial_setup_step_with_retries(
         self,
@@ -4586,19 +4630,13 @@ class VpsDashWindow(QMainWindow):
 
         if host_mode == "windows-local":
             emit(38, "Checking Windows and WSL prerequisites...")
-            wsl_state = self._run_initial_setup_step_with_retries(
-                "Check Windows and WSL prerequisites",
-                lambda: self._windows_local_wsl_state(host_payload),
-                emit=emit,
-                attempts=2,
-                success_check=lambda value: bool(((value or {}).get("list_result") or {}).get("ok")),
-                error_detail=lambda value: ((value or {}).get("list_result") or {}).get("stderr") or ((value or {}).get("list_result") or {}).get("stdout") or "",
-            )
+            wsl_state = self._windows_local_wsl_state(host_payload)
             result["setup"]["wsl"] = {
                 "distro": wsl_state["distro"],
                 "distro_exists": wsl_state["distro_exists"],
                 "distro_ready": wsl_state["distro_ready"],
                 "list_output": wsl_state["list_output"],
+                "list_ok": bool(((wsl_state or {}).get("list_result") or {}).get("ok")),
             }
             if not wsl_state["distro_exists"] or not wsl_state["distro_ready"]:
                 emit(48, f"Installing or initializing WSL distro {wsl_state['distro']}...")
@@ -4616,19 +4654,14 @@ class VpsDashWindow(QMainWindow):
                     "stdout": str(install_result.get("stdout") or ""),
                     "stderr": str(install_result.get("stderr") or ""),
                 }
-                follow_up = self._run_initial_setup_step_with_retries(
-                    "Re-check WSL runtime after install",
-                    lambda: self._windows_local_wsl_state(host_payload),
-                    emit=emit,
-                    attempts=2,
-                    success_check=lambda value: bool(((value or {}).get("list_result") or {}).get("ok")),
-                    error_detail=lambda value: ((value or {}).get("list_result") or {}).get("stderr") or ((value or {}).get("list_result") or {}).get("stdout") or "",
-                )
+                emit(58, "Re-checking WSL runtime after install...")
+                follow_up = self._windows_local_wsl_state(host_payload)
                 result["setup"]["wsl"].update(
                     {
                         "distro_exists": follow_up["distro_exists"],
                         "distro_ready": follow_up["distro_ready"],
                         "list_output": follow_up["list_output"],
+                        "list_ok": bool(((follow_up or {}).get("list_result") or {}).get("ok")),
                     }
                 )
                 if not follow_up["distro_ready"]:

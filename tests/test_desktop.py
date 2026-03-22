@@ -287,6 +287,63 @@ class DesktopTests(unittest.TestCase):
         finally:
             window.close()
 
+    def test_initial_setup_continues_to_wsl_install_when_probe_command_fails(self) -> None:
+        window = VpsDashWindow(VpsDashService(self.root))
+        try:
+            host_payload = {
+                "name": "DESKTOP",
+                "host_mode": "windows-local",
+                "wsl_distribution": "Ubuntu",
+            }
+            progress_updates: list[tuple[int, str]] = []
+            with (
+                patch.object(window, "_project_source_setup_needs_install", return_value=None),
+                patch.object(window, "_project_source_setup_commands", return_value=None),
+                patch.object(
+                    window.service,
+                    "upsert_platform_host",
+                    side_effect=[
+                        {"id": 1, "name": "DESKTOP", "host_mode": "windows-local", "wsl_distribution": "Ubuntu", "status": "draft"},
+                        {"id": 1, "name": "DESKTOP", "host_mode": "windows-local", "wsl_distribution": "Ubuntu", "status": "queued"},
+                    ],
+                ),
+                patch.object(
+                    window,
+                    "_windows_local_wsl_state",
+                    side_effect=[
+                        {
+                            "distro": "Ubuntu",
+                            "distro_exists": False,
+                            "distro_ready": False,
+                            "list_output": "WSL has no installed distributions.",
+                            "list_result": {"ok": False, "stdout": "", "stderr": "WSL not installed"},
+                        },
+                        {
+                            "distro": "Ubuntu",
+                            "distro_exists": False,
+                            "distro_ready": False,
+                            "list_output": "Install queued.",
+                            "list_result": {"ok": False, "stdout": "", "stderr": ""},
+                        },
+                    ],
+                ),
+                patch.object(
+                    window,
+                    "_install_windows_local_wsl",
+                    return_value={"ok": True, "reboot_required": True, "stdout": "restart required", "stderr": ""},
+                ),
+            ):
+                result = window._perform_local_initial_setup_with_progress(
+                    host_payload,
+                    lambda percent, message: progress_updates.append((percent, message)),
+                )
+            self.assertTrue(result["prepare"]["pending"])
+            self.assertTrue(result["prepare"]["reboot_required"])
+            self.assertEqual(result["host"]["status"], "queued")
+            self.assertIn("Installing or initializing WSL distro Ubuntu", " ".join(message for _, message in progress_updates))
+        finally:
+            window.close()
+
     def test_loading_default_prefills_host_bootstrap_fields(self) -> None:
         window = VpsDashWindow(VpsDashService(self.root))
         try:
