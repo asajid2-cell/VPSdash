@@ -6,7 +6,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from vpsdash.app import create_app
 from vpsdash.database import session_scope
@@ -467,6 +467,63 @@ class PlatformTests(unittest.TestCase):
             self.assertEqual(first["id"], second["id"])
             self.assertEqual(len(bootstrap["hosts"]), 1)
             self.assertEqual(bootstrap["hosts"][0]["slug"], "crackerbarrel")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_plain_host_save_clears_stale_error_state_back_to_draft(self) -> None:
+        root = self._isolated_root()
+        try:
+            service = PlatformService(root)
+            host = service.upsert_host(
+                {
+                    "name": "Host A",
+                    "host_mode": "windows-local",
+                    "wsl_distribution": "Ubuntu",
+                    "status": "error",
+                }
+            )
+            refreshed = service.upsert_host(
+                {
+                    "id": host["id"],
+                    "name": "Host A",
+                    "host_mode": "windows-local",
+                    "wsl_distribution": "Ubuntu",
+                }
+            )
+            self.assertEqual(refreshed["status"], "draft")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_doplet_save_allows_unknown_capacity_when_inventory_probe_fails(self) -> None:
+        root = self._isolated_root()
+        try:
+            service = PlatformService(root)
+            host = service.upsert_host(
+                {
+                    "name": "Host A",
+                    "host_mode": "windows-local",
+                    "wsl_distribution": "Ubuntu",
+                }
+            )
+            original = service.agent.capture_inventory
+            service.agent.capture_inventory = MagicMock(side_effect=RuntimeError("probe failed"))
+            try:
+                doplet = service.upsert_doplet(
+                    {
+                        "name": "VM1",
+                        "host_id": host["id"],
+                        "vcpu": 1,
+                        "ram_mb": 1024,
+                        "disk_gb": 20,
+                    }
+                )
+            finally:
+                service.agent.capture_inventory = original
+            self.assertEqual(doplet["name"], "VM1")
+            bootstrap = service.bootstrap()
+            refreshed_host = next(item for item in bootstrap["hosts"] if item["id"] == host["id"])
+            inventory = dict(refreshed_host.get("inventory") or {})
+            self.assertEqual(inventory.get("capacity_probe_error"), "probe failed")
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

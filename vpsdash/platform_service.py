@@ -705,7 +705,11 @@ class PlatformService:
             host.wsl_distribution = payload.get("wsl_distribution") or host.wsl_distribution
             host.mixed_use_allowed = bool(payload.get("mixed_use_allowed", host.mixed_use_allowed))
             host.mixed_use_warning_acknowledged = bool(payload.get("mixed_use_warning_acknowledged", host.mixed_use_warning_acknowledged))
-            host.status = payload.get("status") or host.status
+            requested_status = str(payload.get("status") or "").strip().lower()
+            if requested_status:
+                host.status = requested_status
+            elif str(host.status or "").strip().lower() not in {"ready", "provisioning", "queued"}:
+                host.status = "draft"
             inventory = dict(host.inventory or {})
             if payload.get("inventory"):
                 inventory.update(payload.get("inventory") or {})
