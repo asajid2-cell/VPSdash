@@ -37,7 +37,6 @@ Main pieces:
 - `vpsdash/service.py`: shared desktop/web facade
 - `vpsdash/planner.py`: template-driven deploy-plan generation
 - `vpsdash/diagnostics.py`: diagnostics and monitoring commands
-- `specs/`: product, architecture, security, and roadmap docs for the VPSdash doplet-platform direction
 
 ## Launch
 
@@ -121,8 +120,9 @@ python -m unittest discover -s tests
 - Remote Linux mode is framed as Computer A reaching Computer B over SSH.
 - Password-first SSH bootstrap is supported as a guided manual first-login flow; automated remote execution is intended to resume after you switch the profile to key-based SSH.
 - Generated live plan steps can make real host changes. Use dry run first.
-- Legacy planner state is stored in `data/state.json`.
-- Control-plane state defaults to `data/vpsdash.db` unless `VPSDASH_DATABASE_URL` is set.
+- Source-mode planner state is stored in `data/state.json`.
+- Source-mode control-plane state defaults to `data/vpsdash.db` unless `VPSDASH_DATABASE_URL` is set.
+- Packaged builds store writable app state in the per-user app data directory instead of inside the bundled release files.
 
 
 

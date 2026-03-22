@@ -8,7 +8,6 @@ a = Analysis(
         ('templates', 'templates'),
         ('templates_web', 'templates_web'),
         ('defaults', 'defaults'),
-        ('data', 'data'),
         ('static', 'static'),
         ('assets', 'assets'),
     ],

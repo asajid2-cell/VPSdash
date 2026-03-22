@@ -218,16 +218,20 @@ def _cloud_init_steps(host: dict[str, Any], doplet: dict[str, Any]) -> list[dict
     bootstrap_user = doplet.get("bootstrap_user", "ubuntu")
     bootstrap_password = str(doplet.get("bootstrap_password") or "").strip()
     ssh_keys = doplet.get("ssh_public_keys", [])
+    metadata = dict(doplet.get("metadata_json") or {})
+    auth_mode = str(metadata.get("auth_mode") or "").strip() or ("password+ssh" if ssh_keys else "password")
     payload = {
         "hostname": hostname,
         "bootstrap_user": bootstrap_user,
         "bootstrap_password": bootstrap_password,
         "ssh_keys": ssh_keys,
+        "auth_mode": auth_mode,
     }
     payload_json = json.dumps(payload)
     seed_dir = _seed_dir(host, slug)
     seed_iso = _seed_iso_path(host, slug)
-    password_preamble = "ssh_pwauth: true\\n" if bootstrap_password else ""
+    ssh_password_enabled = bool(bootstrap_password) and auth_mode in {"password", "password+ssh"}
+    password_preamble = f"ssh_pwauth: {'true' if ssh_password_enabled else 'false'}\\n"
     lock_password_line = "    lock_passwd: false\\n" if bootstrap_password else ""
     python_script = "\n".join(
         [
@@ -243,7 +247,7 @@ def _cloud_init_steps(host: dict[str, Any], doplet: dict[str, Any]) -> list[dict
                 "users:\\n"
                 "  - default\\n"
                 f"  - name: {bootstrap_user}\\n"
-                "    sudo: ALL=(ALL) NOPASSWD:ALL\\n"
+                "    sudo: ALL=(ALL) ALL\\n"
                 "    groups: [sudo]\\n"
                 "    shell: /bin/bash\\n"
                 f"{lock_password_line}"

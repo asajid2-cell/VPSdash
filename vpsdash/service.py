@@ -299,11 +299,12 @@ def _normalize_instance(payload: dict, catalog: TemplateCatalog) -> dict[str, An
 
 
 class VpsDashService:
-    def __init__(self, root: Path | str) -> None:
+    def __init__(self, root: Path | str, *, resource_root: Path | str | None = None) -> None:
         self.root = Path(root)
+        self.resource_root = Path(resource_root) if resource_root else self.root
         self.store = StateStore(self.root)
-        self.catalog = TemplateCatalog(self.root)
-        self.default_catalog = DefaultCatalog(self.root)
+        self.catalog = TemplateCatalog(self.resource_root)
+        self.default_catalog = DefaultCatalog(self.resource_root)
         self.platform = PlatformService(self.root)
 
     def bootstrap(self) -> dict[str, Any]:

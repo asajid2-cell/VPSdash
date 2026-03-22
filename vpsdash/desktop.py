@@ -61,10 +61,25 @@ RETRYABLE_PLATFORM_TASK_STATUSES = {"failed", "cancelled"}
 ARCHIVED_PLATFORM_TASK_STATUSES = {"cancelled", "complete", "completed"}
 
 
-def _project_root() -> Path:
+def _resource_root() -> Path:
     runtime_root = getattr(sys, "_MEIPASS", None)
     if runtime_root:
         return Path(runtime_root)
+    return Path(__file__).resolve().parent.parent
+
+
+def _state_root() -> Path:
+    runtime_root = getattr(sys, "_MEIPASS", None)
+    if runtime_root:
+        if os.name == "nt":
+            base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+        elif sys.platform == "darwin":
+            base = Path.home() / "Library" / "Application Support"
+        else:
+            base = Path.home() / ".local" / "share"
+        root = base / "VPSdash"
+        root.mkdir(parents=True, exist_ok=True)
+        return root
     return Path(__file__).resolve().parent.parent
 
 
@@ -77,7 +92,7 @@ def _startup_log_path() -> Path:
 
 
 def _app_icon_path() -> Path:
-    return _project_root() / "assets" / "icons" / "vpsdash_app.ico"
+    return _resource_root() / "assets" / "icons" / "vpsdash_app.ico"
 
 
 def _write_startup_log(message: str) -> None:
@@ -397,8 +412,9 @@ class BackgroundTask(QRunnable):
 
 
 class LocalWebAdminServer:
-    def __init__(self, root: Path, host: str = "127.0.0.1", port: int = 8787) -> None:
-        self.root = root
+    def __init__(self, state_root: Path, resource_root: Path, host: str = "127.0.0.1", port: int = 8787) -> None:
+        self.state_root = state_root
+        self.resource_root = resource_root
         self.host = host
         self.port = port
         self._server: Any = None
@@ -413,7 +429,7 @@ class LocalWebAdminServer:
             return self.url
         from .app import create_app
 
-        app = create_app(self.root)
+        app = create_app(self.state_root, resource_root=self.resource_root)
         self._server = make_server(self.host, self.port, app)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
@@ -486,7 +502,7 @@ class VpsDashWindow(QMainWindow):
         self._watched_task_roots: set[int] = set()
         self._auto_retry_attempts: dict[int, int] = {}
         self._auto_retry_max_attempts = 3
-        self.web_admin_server = LocalWebAdminServer(_project_root())
+        self.web_admin_server = LocalWebAdminServer(_state_root(), _resource_root())
         self.control_plane_view: Any | None = None
         self.control_plane_placeholder: QTextBrowser | None = None
         self.control_plane_panel_layout: QVBoxLayout | None = None
@@ -1280,13 +1296,14 @@ class VpsDashWindow(QMainWindow):
         self.native_doplet_storage.addItem("ZFS", "zfs")
         self.native_doplet_storage.addItem("LVM-thin", "lvm-thin")
         self.native_doplet_auth_mode = QComboBox()
-        self.native_doplet_auth_mode.addItem("Password login", "password")
         self.native_doplet_auth_mode.addItem("SSH key only", "ssh")
         self.native_doplet_auth_mode.addItem("Password + SSH", "password+ssh")
+        self.native_doplet_auth_mode.addItem("Password login", "password")
         self.native_doplet_auth_mode.currentIndexChanged.connect(self._native_auth_mode_changed)
         self.native_doplet_bootstrap_user = QLineEdit("ubuntu")
         self.native_doplet_bootstrap_password = QLineEdit()
-        self.native_doplet_bootstrap_password.setPlaceholderText("Set a first-login password")
+        self.native_doplet_bootstrap_password.setText("bypass")
+        self.native_doplet_bootstrap_password.setPlaceholderText("Default sudo password is bypass")
         self.native_doplet_bootstrap_password.setEchoMode(QLineEdit.Password)
         self.native_doplet_keys = QPlainTextEdit()
         self.native_doplet_keys.setPlaceholderText("One public SSH key per line")
@@ -1302,9 +1319,9 @@ class VpsDashWindow(QMainWindow):
         add_form_row(builder_form, "RAM (MB)", self.native_doplet_ram, "How much memory this VPS reserves from the host, in megabytes.")
         add_form_row(builder_form, "Disk (GB)", self.native_doplet_disk, "How much virtual disk space this VPS gets on the host SSD.")
         add_form_row(builder_form, "Storage", self.native_doplet_storage, "Where the VPS disk is backed on the host. Files / qcow2 is the simplest starting option.")
-        add_form_row(builder_form, "Login method", self.native_doplet_auth_mode, "Choose how you will get into the VPS the first time: password, SSH key, or both.")
+        add_form_row(builder_form, "Login method", self.native_doplet_auth_mode, "Choose whether SSH password login is disabled, enabled with keys, or password-only. SSH key only still keeps a local sudo password unless you change it.")
         add_form_row(builder_form, "Bootstrap user", self.native_doplet_bootstrap_user, "The first Linux username created inside the VPS for initial access.")
-        add_form_row(builder_form, "Bootstrap password", self.native_doplet_bootstrap_password, "The first password for the bootstrap user. Leave it empty if you are doing SSH-only access.")
+        add_form_row(builder_form, "Login / sudo password", self.native_doplet_bootstrap_password, "The bootstrap user's local password. In SSH key only mode this still becomes the default sudo/local login password, but SSH password login stays disabled.")
         add_form_row(builder_form, "SSH public keys", self.native_doplet_keys, "Paste one full public .pub key line per row. Never paste a private key here.")
         builder_grid.addLayout(builder_form, 0, 0)
 
@@ -1373,6 +1390,8 @@ class VpsDashWindow(QMainWindow):
         native_builder_actions.addWidget(self.native_copy_terminal_button)
         native_builder_actions.addStretch(1)
         native_builder_layout.addLayout(native_builder_actions)
+        self.native_doplet_auth_mode.setCurrentIndex(0)
+        self._native_auth_mode_changed()
         layout.addWidget(native_builder_card)
 
         defaults_card = card_frame()
@@ -3270,21 +3289,26 @@ class VpsDashWindow(QMainWindow):
         self.native_doplet_disk.setValue(int(flavor.get("disk_gb") or 20))
 
     def _native_auth_mode_changed(self, *_args: Any) -> None:
-        auth_mode = str(self.native_doplet_auth_mode.currentData() or "password")
-        password_enabled = auth_mode in {"password", "password+ssh"}
+        auth_mode = str(self.native_doplet_auth_mode.currentData() or "ssh")
         ssh_enabled = auth_mode in {"ssh", "password+ssh"}
-        self.native_doplet_bootstrap_password.setEnabled(password_enabled)
-        if not password_enabled:
-            self.native_doplet_bootstrap_password.clear()
+        self.native_doplet_bootstrap_password.setEnabled(True)
         self.native_doplet_keys.setEnabled(ssh_enabled)
         if ssh_enabled:
             self.native_doplet_keys.setPlaceholderText("One public SSH key per line")
         else:
             self.native_doplet_keys.setPlaceholderText("SSH keys are disabled for password-only login")
-        if password_enabled:
-            self.native_doplet_bootstrap_password.setPlaceholderText("Set a first-login password")
+        if auth_mode == "ssh":
+            if not self.native_doplet_bootstrap_password.text().strip():
+                self.native_doplet_bootstrap_password.setText("bypass")
+            self.native_doplet_bootstrap_password.setPlaceholderText("Local/sudo password. SSH password login stays disabled in this mode.")
+        elif auth_mode == "password+ssh":
+            if not self.native_doplet_bootstrap_password.text().strip():
+                self.native_doplet_bootstrap_password.setText("bypass")
+            self.native_doplet_bootstrap_password.setPlaceholderText("Used for sudo, console login, and SSH password login.")
         else:
-            self.native_doplet_bootstrap_password.setPlaceholderText("Password login disabled for SSH-only mode")
+            if not self.native_doplet_bootstrap_password.text().strip():
+                self.native_doplet_bootstrap_password.setText("bypass")
+            self.native_doplet_bootstrap_password.setPlaceholderText("Used for password login and sudo.")
 
     def _resources_doplet_selection_changed(self) -> None:
         doplet_id = self._selected_resources_doplet_id()
@@ -3397,7 +3421,7 @@ class VpsDashWindow(QMainWindow):
         self.native_doplet_ram.setValue(int(doplet.get("ram_mb") or 1024))
         self.native_doplet_disk.setValue(int(doplet.get("disk_gb") or 20))
         self.native_doplet_bootstrap_user.setText(str(doplet.get("bootstrap_user") or "ubuntu"))
-        bootstrap_password = str(doplet.get("bootstrap_password") or "")
+        bootstrap_password = str(doplet.get("bootstrap_password") or "bypass")
         auth_mode = self._doplet_auth_mode(doplet)
         auth_index = self.native_doplet_auth_mode.findData(auth_mode)
         if auth_index >= 0:
@@ -3407,11 +3431,10 @@ class VpsDashWindow(QMainWindow):
         self._native_auth_mode_changed()
 
     def _collect_native_doplet_payload(self) -> dict[str, Any]:
-        auth_mode = str(self.native_doplet_auth_mode.currentData() or "password")
-        include_password = auth_mode in {"password", "password+ssh"}
+        auth_mode = str(self.native_doplet_auth_mode.currentData() or "ssh")
         include_keys = auth_mode in {"ssh", "password+ssh"}
         keys = [line.strip() for line in self.native_doplet_keys.toPlainText().splitlines() if line.strip()] if include_keys else []
-        bootstrap_password = self.native_doplet_bootstrap_password.text().strip() if include_password else ""
+        bootstrap_password = self.native_doplet_bootstrap_password.text().strip() or "bypass"
         metadata_json: dict[str, Any] = {"auth_mode": auth_mode}
         local_private_key_path = self._matching_local_private_key_path(keys)
         if local_private_key_path:
@@ -4242,7 +4265,7 @@ class VpsDashWindow(QMainWindow):
     def _project_source_setup_commands(self) -> tuple[str, str] | None:
         if getattr(sys, "frozen", False):
             return None
-        project_root = _project_root()
+        project_root = _resource_root()
         requirements = project_root / "requirements.txt"
         if not requirements.exists():
             return None
@@ -4258,7 +4281,7 @@ class VpsDashWindow(QMainWindow):
     def _project_source_setup_needs_install(self) -> dict[str, Any] | None:
         if getattr(sys, "frozen", False):
             return None
-        project_root = _project_root()
+        project_root = _resource_root()
         requirements = project_root / "requirements.txt"
         if not requirements.exists():
             return None
@@ -5547,7 +5570,7 @@ def run_desktop_app() -> None:
     font.setPointSize(10)
     app.setFont(font)
     app.setStyleSheet(APP_QSS)
-    service = VpsDashService(_project_root())
+    service = VpsDashService(_state_root(), resource_root=_resource_root())
     window = VpsDashWindow(service)
     if icon_path.exists():
         window.setWindowIcon(QIcon(str(icon_path)))

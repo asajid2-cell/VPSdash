@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import os
 import secrets
 import sys
 from datetime import datetime, timedelta, timezone
@@ -17,10 +18,25 @@ DEVICE_COOKIE_NAME = "vpsdash_device"
 LEGACY_DEVICE_COOKIE_NAME = "vps_harmonizer_device"
 
 
-def _project_root() -> Path:
+def _resource_root() -> Path:
     runtime_root = getattr(sys, "_MEIPASS", None)
     if runtime_root:
         return Path(runtime_root)
+    return Path(__file__).resolve().parent.parent
+
+
+def _state_root() -> Path:
+    runtime_root = getattr(sys, "_MEIPASS", None)
+    if runtime_root:
+        if sys.platform == "win32":
+            base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+        elif sys.platform == "darwin":
+            base = Path.home() / "Library" / "Application Support"
+        else:
+            base = Path.home() / ".local" / "share"
+        root = base / "VPSdash"
+        root.mkdir(parents=True, exist_ok=True)
+        return root
     return Path(__file__).resolve().parent.parent
 
 
@@ -101,12 +117,13 @@ def _sensitive_action_guard() -> None:
         abort(403, description="MFA freshness window expired.")
 
 
-def create_app(root: Path | str | None = None) -> Flask:
-    root = Path(root) if root else _project_root()
-    static_dir = root / "static"
-    template_dir = root / "templates_web"
+def create_app(root: Path | str | None = None, *, resource_root: Path | str | None = None) -> Flask:
+    state_root = Path(root) if root else _state_root()
+    resource_root_path = Path(resource_root) if resource_root else _resource_root()
+    static_dir = resource_root_path / "static"
+    template_dir = resource_root_path / "templates_web"
     app = Flask(__name__, static_folder=str(static_dir), static_url_path="/static", template_folder=str(template_dir))
-    service = VpsDashService(root)
+    service = VpsDashService(state_root, resource_root=resource_root_path)
     app.secret_key = service.platform.config.flask_secret_key
     secure_cookie = service.platform.config.public_base_url.startswith("https://")
     app.config.update(

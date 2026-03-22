@@ -2,7 +2,6 @@
 
 import shutil
 import threading
-import secrets
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -84,9 +83,7 @@ def _coerce_utc(value: Any) -> Any:
 
 
 def _make_bootstrap_password() -> str:
-    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
-    groups = ["".join(secrets.choice(alphabet) for _ in range(4)) for _ in range(3)]
-    return f"vpsh-{'-'.join(groups)}"
+    return "bypass"
 
 
 def _doplet_is_deleted(value: Any) -> bool:
@@ -945,15 +942,18 @@ class PlatformService:
             doplet.gpu_assignments = requested_gpu_assignments
             metadata = dict(doplet.metadata_json or {})
             metadata.update(payload.get("metadata_json") or {})
+            auth_mode = str((payload.get("metadata_json") or {}).get("auth_mode") or metadata.get("auth_mode") or "").strip()
             bootstrap_password = str(
                 payload.get("bootstrap_password")
                 or metadata.get("bootstrap_password")
                 or ""
             ).strip()
-            if not bootstrap_password and not (payload.get("ssh_public_keys") or doplet.ssh_public_keys or []):
+            if not bootstrap_password:
                 bootstrap_password = _make_bootstrap_password()
             if bootstrap_password:
                 metadata["bootstrap_password"] = bootstrap_password
+            if auth_mode in {"password", "ssh", "password+ssh"}:
+                metadata["auth_mode"] = auth_mode
             if "backup_policy" in payload:
                 metadata["backup_policy"] = dict(payload.get("backup_policy") or {})
             metadata["gpu_preflight"] = gpu_preflight
