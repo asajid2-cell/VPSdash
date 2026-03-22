@@ -100,6 +100,8 @@ class ExecutionTests(unittest.TestCase):
             details = describe_doplet_terminal(host, doplet, establish_localhost_endpoint=False)
         ensure_proxy.assert_not_called()
         self.assertEqual(details["launcher"], "windows-wsl")
+        self.assertEqual(details["forward_port"], 22041)
+        self.assertEqual(details["forward_host"], "127.0.0.1")
         self.assertIn("Use Open Terminal to let VPSdash try a localhost endpoint", details["access_note"])
 
     def test_terminal_description_prefers_freshly_discovered_ip_over_stale_cached_ip(self) -> None:

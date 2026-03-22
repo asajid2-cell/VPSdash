@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from .capacity import can_allocate, capacity_summary, gpu_assignment_preflight, summarize_inventory
 from .config import PlatformConfig, load_config
 from .database import apply_schema_migrations, create_platform_engine, create_session_factory, session_scope
-from .execution import PlanCancelled, describe_doplet_terminal, inspect_doplet_runtime, open_doplet_terminal
+from .execution import PlanCancelled, describe_doplet_terminal, inspect_doplet_runtime, inspect_host_domains, open_doplet_terminal
 from .host_agent import HostAgent
 from .mailer import Mailer
 from .models import (
@@ -95,6 +95,31 @@ def _doplet_is_deleted(value: Any) -> bool:
     else:
         status = getattr(value, "status", None)
     return str(status or "").strip().lower() == "deleted"
+
+
+def _host_runtime_key(payload: dict[str, Any]) -> str:
+    mode = str(payload.get("host_mode") or payload.get("mode") or "").strip().lower()
+    distro = str(payload.get("wsl_distribution") or payload.get("distro") or "").strip().lower()
+    if mode in {"windows-local", "windows-wsl-local", "linux-local", "linux-hypervisor"}:
+        return f"{mode}|{distro}"
+    ssh_host = str(payload.get("ssh_host") or "").strip().lower()
+    ssh_user = str(payload.get("ssh_user") or "").strip().lower()
+    ssh_port = str(payload.get("ssh_port") or "").strip().lower()
+    return f"{mode}|{ssh_user}|{ssh_host}|{ssh_port}|{distro}"
+
+
+def _host_runtime_priority(payload: dict[str, Any], live_doplet_count: int) -> tuple[int, int]:
+    status = str(payload.get("status") or "").strip().lower()
+    ready_rank = 2 if status == "ready" else 1 if status in {"provisioning", "queued"} else 0
+    return (int(live_doplet_count), ready_rank)
+
+
+def _suffixed_slug_base(slug: str) -> str:
+    value = str(slug or "").strip()
+    if "-" not in value:
+        return ""
+    base, suffix = value.rsplit("-", 1)
+    return base if suffix.isdigit() else ""
 
 
 @dataclass(slots=True)
@@ -242,6 +267,8 @@ class PlatformService:
             return {"changed": 0, "checked": 0}
         changed = 0
         checked = 0
+        imported = 0
+        revived = 0
         with session_scope(self.session_factory) as session:
             active_doplet_ids = {
                 int(task.target_id)
@@ -254,21 +281,127 @@ class PlatformService:
                 if str(task.target_id or "").isdigit()
             }
             hosts = session.scalars(select(HostNode).order_by(HostNode.id)).all()
-            for host in hosts:
-                host_payload = self._host_payload(host)
-                doplets = session.scalars(select(Doplet).where(Doplet.host_id == host.id).order_by(Doplet.id)).all()
+            all_doplets = session.scalars(select(Doplet).order_by(Doplet.id)).all()
+            host_payload_by_id = {int(host.id): self._host_payload(host) for host in hosts}
+            runtime_key_by_host_id = {host_id: _host_runtime_key(payload) for host_id, payload in host_payload_by_id.items()}
+            live_doplet_count_by_host_id = {
+                int(host.id): sum(1 for item in all_doplets if int(item.host_id or 0) == int(host.id) and not _doplet_is_deleted(item))
+                for host in hosts
+            }
+            ordered_hosts = sorted(
+                hosts,
+                key=lambda item: (
+                    _host_runtime_priority(host_payload_by_id[int(item.id)], live_doplet_count_by_host_id.get(int(item.id), 0)),
+                    -int(item.id),
+                ),
+                reverse=True,
+            )
+            scanned_runtime_keys: set[str] = set()
+            for host in ordered_hosts:
+                host_id = int(host.id)
+                host_payload = host_payload_by_id[host_id]
+                runtime_key = runtime_key_by_host_id.get(host_id, "")
+                if runtime_key in scanned_runtime_keys:
+                    inventory = dict(host.inventory or {})
+                    inventory["runtime_scan_skipped_duplicate_of"] = runtime_key
+                    inventory["runtime_scan_skipped_at"] = self._now().isoformat()
+                    host.inventory = inventory
+                    continue
+                scanned_runtime_keys.add(runtime_key)
+                doplets = [
+                    item
+                    for item in all_doplets
+                    if runtime_key_by_host_id.get(int(item.host_id or 0)) == runtime_key
+                ]
+                domains: list[dict[str, Any]] = []
+                try:
+                    domains = inspect_host_domains(host_payload)
+                except Exception as exc:
+                    inventory = dict(host.inventory or {})
+                    inventory["runtime_domain_scan_error"] = str(exc)
+                    inventory["runtime_domain_scan_error_at"] = self._now().isoformat()
+                    host.inventory = inventory
+                    domains = []
+                domain_map = {str(item.get("slug") or "").strip(): item for item in domains if str(item.get("slug") or "").strip()}
+                existing_by_slug = {str(item.slug or "").strip(): item for item in doplets if str(item.slug or "").strip()}
+                for domain in domains:
+                    slug = str(domain.get("slug") or "").strip()
+                    if not slug:
+                        continue
+                    existing = existing_by_slug.get(slug)
+                    if existing is None:
+                        imported_doplet = Doplet(
+                            slug=_unique_slug(session, Doplet, slug),
+                            name=str(domain.get("name") or slug),
+                            host_id=host.id,
+                            status=str(domain.get("status") or "running"),
+                            ip_addresses=[str(item).strip() for item in domain.get("ip_addresses") or [] if str(item).strip()],
+                            storage_backend=host.primary_storage_backend or "files",
+                            bootstrap_user="ubuntu",
+                            metadata_json={
+                                "orphan_imported": True,
+                                "orphan_imported_at": self._now().isoformat(),
+                                "runtime_raw_state": str(domain.get("raw_state") or ""),
+                                "runtime_last_seen_at": self._now().isoformat(),
+                                "runtime_last_ip_addresses": [str(item).strip() for item in domain.get("ip_addresses") or [] if str(item).strip()],
+                            },
+                        )
+                        session.add(imported_doplet)
+                        session.flush()
+                        existing_by_slug[slug] = imported_doplet
+                        doplets.append(imported_doplet)
+                        changed += 1
+                        imported += 1
+                        continue
+                    if _doplet_is_deleted(existing):
+                        metadata = dict(existing.metadata_json or {})
+                        metadata["deleted_at"] = ""
+                        metadata["revived_from_runtime_reconcile_at"] = self._now().isoformat()
+                        metadata["runtime_raw_state"] = str(domain.get("raw_state") or "")
+                        metadata["runtime_last_seen_at"] = self._now().isoformat()
+                        metadata["runtime_last_ip_addresses"] = [str(item).strip() for item in domain.get("ip_addresses") or [] if str(item).strip()]
+                        existing.status = str(domain.get("status") or "running")
+                        existing.ip_addresses = [str(item).strip() for item in domain.get("ip_addresses") or [] if str(item).strip()]
+                        existing.metadata_json = metadata
+                        changed += 1
+                        revived += 1
+                for doplet in doplets:
+                    metadata = dict(doplet.metadata_json or {})
+                    base_slug = _suffixed_slug_base(str(doplet.slug or ""))
+                    if not base_slug or base_slug not in domain_map:
+                        continue
+                    if not metadata.get("orphan_imported"):
+                        continue
+                    if str(doplet.status or "").strip().lower() != "missing":
+                        continue
+                    metadata["deleted_at"] = metadata.get("deleted_at") or self._now().isoformat()
+                    metadata["superseded_by_runtime_slug"] = base_slug
+                    metadata["superseded_at"] = self._now().isoformat()
+                    doplet.status = "deleted"
+                    doplet.ip_addresses = []
+                    doplet.metadata_json = metadata
+                    changed += 1
                 for doplet in doplets:
                     if _doplet_is_deleted(doplet) or doplet.id in active_doplet_ids:
                         continue
                     checked += 1
-                    try:
-                        runtime = inspect_doplet_runtime(host_payload, self._doplet_payload(doplet))
-                    except Exception as exc:
-                        inventory = dict(host.inventory or {})
-                        inventory["runtime_sync_error"] = str(exc)
-                        inventory["runtime_sync_error_at"] = self._now().isoformat()
-                        host.inventory = inventory
-                        continue
+                    domain_runtime = domain_map.get(str(doplet.slug or "").strip())
+                    if domain_runtime is not None:
+                        runtime = {
+                            "exists": True,
+                            "raw_state": str(domain_runtime.get("raw_state") or ""),
+                            "status": str(domain_runtime.get("status") or doplet.status or "").strip().lower() or doplet.status,
+                            "ip_addresses": [str(item).strip() for item in domain_runtime.get("ip_addresses") or [] if str(item).strip()],
+                        }
+                    else:
+                        try:
+                            runtime = inspect_doplet_runtime(host_payload, self._doplet_payload(doplet))
+                        except Exception as exc:
+                            inventory = dict(host.inventory or {})
+                            inventory["runtime_sync_error"] = str(exc)
+                            inventory["runtime_sync_error_at"] = self._now().isoformat()
+                            host.inventory = inventory
+                            continue
                     next_status = str(runtime.get("status") or doplet.status or "").strip().lower() or doplet.status
                     next_ips = [str(item).strip() for item in runtime.get("ip_addresses") or [] if str(item).strip()]
                     doplet_changed = False
@@ -292,6 +425,23 @@ class PlatformService:
                     if metadata != dict(doplet.metadata_json or {}):
                         doplet.metadata_json = metadata
                         doplet_changed = True
+                    host_mode = str(host_payload.get("host_mode") or host_payload.get("mode") or "").strip().lower()
+                    if next_status == "running" and host_mode in {"windows-local", "windows-wsl-local"}:
+                        try:
+                            terminal_details = describe_doplet_terminal(
+                                host_payload,
+                                self._doplet_payload(doplet),
+                                establish_localhost_endpoint=True,
+                            )
+                            self._persist_doplet_terminal_details(doplet, terminal_details)
+                            doplet_changed = True
+                        except Exception as exc:
+                            metadata = dict(doplet.metadata_json or {})
+                            metadata["access_refresh_error"] = str(exc)
+                            metadata["access_refresh_error_at"] = self._now().isoformat()
+                            if metadata != dict(doplet.metadata_json or {}):
+                                doplet.metadata_json = metadata
+                                doplet_changed = True
                     if doplet_changed:
                         changed += 1
             if changed:
@@ -302,11 +452,11 @@ class PlatformService:
                         target_type="control-plane",
                         target_id="doplets",
                         summary=f"Reconciled {changed} Doplet runtime records",
-                        details={"checked": checked, "changed": changed},
+                        details={"checked": checked, "changed": changed, "imported": imported, "revived": revived},
                     )
                 )
         self._last_runtime_reconcile_at = time.monotonic()
-        return {"changed": changed, "checked": checked}
+        return {"changed": changed, "checked": checked, "imported": imported, "revived": revived}
 
     def list_users(self) -> list[dict[str, Any]]:
         with session_scope(self.session_factory) as session:

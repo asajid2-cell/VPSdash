@@ -117,6 +117,15 @@ def _escape(value: Any) -> str:
     return html.escape(str(value if value is not None else ""))
 
 
+def _coerce_int(value: Any, default: int = 0) -> int:
+    try:
+        if value in (None, ""):
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 class AutoHeightButton(QPushButton):
     def __init__(self, text: str, preferred_height: int, parent: QWidget | None = None) -> None:
         super().__init__(text, parent)
@@ -2879,7 +2888,7 @@ class VpsDashWindow(QMainWindow):
             self.native_doplets_tree.blockSignals(True)
             self.native_doplets_tree.clear()
             for doplet in self._control_plane_doplets():
-                host = next((item for item in control_plane.get("hosts", []) if int(item.get("id", 0)) == int(doplet.get("host_id", 0))), {})
+                host = next((item for item in control_plane.get("hosts", []) if _coerce_int(item.get("id")) == _coerce_int(doplet.get("host_id"))), {})
                 access = ", ".join(doplet.get("ip_addresses") or []) or doplet.get("bootstrap_user", "-")
                 item = QTreeWidgetItem(
                     [
@@ -2957,7 +2966,7 @@ class VpsDashWindow(QMainWindow):
             self.resources_local_doplets_tree.blockSignals(True)
             self.resources_local_doplets_tree.clear()
             for doplet in active_local:
-                host = next((item for item in local_hosts if int(item.get("id", 0)) == int(doplet.get("host_id", 0))), {})
+                host = next((item for item in local_hosts if _coerce_int(item.get("id")) == _coerce_int(doplet.get("host_id"))), {})
                 item = QTreeWidgetItem(
                     [
                         str(doplet.get("name") or "Doplet"),
@@ -3179,7 +3188,7 @@ class VpsDashWindow(QMainWindow):
 
     def _doplet_by_id(self, doplet_id: int, *, local_only: bool = False) -> dict[str, Any] | None:
         source = self._local_control_plane_doplets() if local_only else self._control_plane_doplets()
-        return next((item for item in source if int(item.get("id", 0)) == int(doplet_id)), None)
+        return next((item for item in source if _coerce_int(item.get("id")) == _coerce_int(doplet_id)), None)
 
     def _prompt_resize_spec(self, doplet: dict[str, Any]) -> dict[str, int] | None:
         dialog = QDialog(self)
@@ -3279,12 +3288,12 @@ class VpsDashWindow(QMainWindow):
 
     def _resources_doplet_selection_changed(self) -> None:
         doplet_id = self._selected_resources_doplet_id()
-        doplet = next((item for item in self._local_control_plane_doplets() if int(item.get("id", 0)) == int(doplet_id or 0)), None)
+        doplet = next((item for item in self._local_control_plane_doplets() if _coerce_int(item.get("id")) == _coerce_int(doplet_id)), None)
         if not doplet:
             if hasattr(self, "resources_local_doplet_detail"):
                 self.resources_local_doplet_detail.setPlainText("Select a local Doplet to inspect its current CPU, RAM, disk, access, and lifecycle state.")
             return
-        host = next((item for item in self._local_control_plane_hosts() if int(item.get("id", 0)) == int(doplet.get("host_id", 0))), {})
+        host = next((item for item in self._local_control_plane_hosts() if _coerce_int(item.get("id")) == _coerce_int(doplet.get("host_id"))), {})
         try:
             terminal = self.service.describe_doplet_terminal(int(doplet["id"]), establish_localhost_endpoint=False)
         except Exception as exc:
@@ -3316,7 +3325,7 @@ class VpsDashWindow(QMainWindow):
 
     def _resources_remote_host_selection_changed(self) -> None:
         host_id = self._selected_resources_remote_host_id()
-        host = next((item for item in self._remote_control_plane_hosts() if int(item.get("id", 0)) == int(host_id or 0)), None)
+        host = next((item for item in self._remote_control_plane_hosts() if _coerce_int(item.get("id")) == _coerce_int(host_id)), None)
         if not host:
             if hasattr(self, "resources_remote_host_detail"):
                 self.resources_remote_host_detail.setPlainText("Select a remote host to inspect its available CPU, RAM, disk, and storage posture separately from this machine.")
@@ -3333,14 +3342,14 @@ class VpsDashWindow(QMainWindow):
 
     def _native_doplet_selection_changed(self) -> None:
         doplet_id = self._selected_native_doplet_id()
-        doplet = next((item for item in self._control_plane_doplets() if int(item.get("id", 0)) == int(doplet_id or 0)), None)
+        doplet = next((item for item in self._control_plane_doplets() if _coerce_int(item.get("id")) == _coerce_int(doplet_id)), None)
         if not doplet:
             if hasattr(self, "native_doplet_detail"):
                 self.native_doplet_detail.setPlainText("Select a Doplet to manage it natively.")
             return
         self.current_native_doplet_id = int(doplet["id"])
-        host = next((item for item in self._control_plane_hosts() if int(item.get("id", 0)) == int(doplet.get("host_id", 0))), {})
-        image = next((item for item in self._control_plane_images() if int(item.get("id", 0)) == int(doplet.get("image_id", 0))), {})
+        host = next((item for item in self._control_plane_hosts() if _coerce_int(item.get("id")) == _coerce_int(doplet.get("host_id"))), {})
+        image = next((item for item in self._control_plane_images() if _coerce_int(item.get("id")) == _coerce_int(doplet.get("image_id"))), {})
         try:
             terminal = self.service.describe_doplet_terminal(int(doplet["id"]), establish_localhost_endpoint=False)
         except Exception as exc:
@@ -3657,7 +3666,7 @@ class VpsDashWindow(QMainWindow):
         if not resource_id:
             self._set_status("Choose a local Doplet first", 3000)
             return
-        doplet = next((item for item in self._local_control_plane_doplets() if int(item.get("id", 0)) == int(resource_id)), None)
+        doplet = next((item for item in self._local_control_plane_doplets() if _coerce_int(item.get("id")) == _coerce_int(resource_id)), None)
         if not doplet:
             self._set_status("Selected Doplet is no longer available", 4000)
             return
@@ -3816,7 +3825,7 @@ class VpsDashWindow(QMainWindow):
         if not doplet_id:
             self._set_status("Choose a Doplet first", 3000)
             return
-        doplet = next((item for item in self._control_plane_doplets() if int(item.get("id", 0)) == int(doplet_id)), None)
+        doplet = next((item for item in self._control_plane_doplets() if _coerce_int(item.get("id")) == _coerce_int(doplet_id)), None)
         if not doplet:
             self._set_status("Selected Doplet is no longer available", 4000)
             return

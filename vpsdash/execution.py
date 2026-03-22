@@ -19,6 +19,7 @@ class PlanCancelled(Exception):
 WINDOWS_LOCAL_MODES = {"windows-local", "windows-wsl-local"}
 WINDOWS_REMOTE_MODES = {"windows-remote", "windows-wsl-remote"}
 LINUX_LOCAL_MODES = {"linux-local", "linux-hypervisor"}
+WINDOWS_LOCAL_PROXY_WAIT_SECONDS = 12.0
 
 
 def _subprocess_kwargs() -> dict[str, Any]:
@@ -407,7 +408,42 @@ def inspect_doplet_runtime(host: dict[str, Any], doplet: dict[str, Any]) -> dict
     }
 
 
+def inspect_host_domains(host: dict[str, Any]) -> list[dict[str, Any]]:
+    result = _run_virsh_probe(host, "virsh list --all --name 2>/dev/null || true", timeout=20)
+    names = [str(line).strip() for line in str(result.get("stdout") or "").splitlines() if str(line).strip()]
+    domains: list[dict[str, Any]] = []
+    for name in names:
+        raw_state_result = _run_virsh_probe(host, f"virsh domstate {shlex.quote(name)} 2>/dev/null || true", timeout=10)
+        raw_state = str(raw_state_result.get("stdout") or "").strip()
+        status = _normalize_doplet_runtime_status(raw_state, "missing")
+        ip_addresses: list[str] = []
+        if raw_state and status in {"running", "paused"}:
+            try:
+                ip_addresses = _discover_doplet_ip_addresses(host, name)
+            except Exception:
+                ip_addresses = []
+        domains.append(
+            {
+                "slug": name,
+                "name": name,
+                "raw_state": raw_state,
+                "status": status,
+                "ip_addresses": ip_addresses,
+            }
+        )
+    return domains
+
+
 def _windows_local_proxy_port(doplet: dict[str, Any]) -> int:
+    metadata = dict(doplet.get("metadata_json") or {})
+    access = dict(metadata.get("access") or {})
+    for candidate in (metadata.get("local_ssh_port"), access.get("forward_port")):
+        try:
+            port = int(candidate or 0)
+        except (TypeError, ValueError):
+            port = 0
+        if 22000 <= port <= 65000:
+            return port
     doplet_id = int(doplet.get("id") or 0)
     base_port = 22000 + doplet_id
     if 22000 <= base_port <= 65000:
@@ -494,14 +530,22 @@ def _ensure_windows_local_ssh_proxy(host: dict[str, Any], doplet: dict[str, Any]
         ]
     )
     run_host_local_command(host, command, timeout=8, run_as_root=False)
-    for _ in range(16):
+    attempts = max(24, int(WINDOWS_LOCAL_PROXY_WAIT_SECONDS / 0.25))
+    wsl_ready = False
+    for _ in range(attempts):
         time.sleep(0.25)
-        if _windows_local_proxy_is_ready(host, port) and _windows_local_native_port_is_ready(port):
+        wsl_ready = _windows_local_proxy_is_ready(host, port)
+        native_ready = _windows_local_native_port_is_ready(port)
+        if wsl_ready and native_ready:
             return port
     wsl_log = run_host_local_command(host, f"tail -n 40 {shlex.quote(log_path)} 2>/dev/null || true", timeout=5, run_as_root=False)
     detail = str(wsl_log.get("stdout") or wsl_log.get("stderr") or "").strip()
     raise RuntimeError(
-        f"Could not start the Windows-local SSH bridge for {primary_ip}:22."
+        (
+            f"Could not start the Windows-local SSH bridge for {primary_ip}:22."
+            if not wsl_ready
+            else f"The WSL-side SSH bridge for {primary_ip}:22 started, but Windows localhost forwarding to 127.0.0.1:{port} is not ready yet."
+        )
         + (f"\n\nBridge log:\n{detail}" if detail else "")
     )
 
@@ -580,6 +624,7 @@ def describe_doplet_terminal(
             access_note = "This guest IP is on the WSL/libvirt network. VPSdash will prefer a localhost SSH endpoint and fall back to the selected local WSL runtime if needed."
         ssh_ready = _guest_ssh_is_reachable(host, primary_ip) if primary_ip else False
         if primary_ip and ssh_ready:
+            expected_proxy_port = _windows_local_proxy_port(doplet)
             if establish_localhost_endpoint:
                 try:
                     proxy_port = _ensure_windows_local_ssh_proxy(host, doplet, primary_ip)
@@ -604,11 +649,13 @@ def describe_doplet_terminal(
                         "reason": "",
                         "inner_command": inner_command,
                         "access_label": f"WSL SSH {bootstrap_user}@{primary_ip}",
-                        "access_note": (access_note + " " if access_note else "") + "Localhost SSH endpoint is unavailable right now, so VPSdash is using direct WSL SSH.",
+                        "access_note": (access_note + " " if access_note else "") + f"Expected local SSH endpoint: ssh -p {expected_proxy_port} {bootstrap_user}@127.0.0.1. Localhost SSH endpoint is unavailable right now, so VPSdash is using direct WSL SSH.",
+                        "forward_host": "127.0.0.1",
+                        "forward_port": expected_proxy_port,
                         "status": status,
                     }
             else:
-                proxy_port = _windows_local_proxy_port(doplet)
+                proxy_port = expected_proxy_port
                 if not (_windows_local_proxy_is_ready(host, proxy_port) and _windows_local_native_port_is_ready(proxy_port)):
                     inner_command = _ssh_inner_command(
                         bootstrap_user,
@@ -629,7 +676,9 @@ def describe_doplet_terminal(
                         "reason": "",
                         "inner_command": inner_command,
                         "access_label": f"WSL SSH {bootstrap_user}@{primary_ip}",
-                        "access_note": (access_note + " " if access_note else "") + "Use Open Terminal to let VPSdash try a localhost endpoint, or run the WSL SSH command directly.",
+                        "access_note": (access_note + " " if access_note else "") + f"Expected local SSH endpoint: ssh -p {proxy_port} {bootstrap_user}@127.0.0.1. Use Open Terminal to let VPSdash try a localhost endpoint, or run the WSL SSH command directly.",
+                        "forward_host": "127.0.0.1",
+                        "forward_port": proxy_port,
                         "status": status,
                     }
             preview_command = _windows_native_ssh_command(

@@ -154,12 +154,130 @@ class PlatformTests(unittest.TestCase):
                         result_payload={},
                     )
                 )
-            with patch("vpsdash.platform_service.inspect_doplet_runtime") as inspect_mock:
+            with (
+                patch("vpsdash.platform_service.inspect_host_domains", return_value=[]),
+                patch("vpsdash.platform_service.inspect_doplet_runtime") as inspect_mock,
+            ):
                 result = service.reconcile_runtime_state(force=True)
             self.assertEqual(result["changed"], 0)
             inspect_mock.assert_not_called()
-            refreshed = next(item for item in service.bootstrap()["doplets"] if item["id"] == doplet["id"])
+            with patch("vpsdash.platform_service.inspect_host_domains", return_value=[]):
+                refreshed = next(item for item in service.bootstrap()["doplets"] if item["id"] == doplet["id"])
             self.assertEqual(refreshed["status"], "provisioning")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_runtime_reconcile_imports_orphan_runtime_domains(self) -> None:
+        root = self._isolated_root()
+        try:
+            service = PlatformService(root)
+            host = service.upsert_host({"name": "Host A", "host_mode": "windows-local", "wsl_distribution": "Ubuntu"})
+            with (
+                patch("vpsdash.platform_service.inspect_host_domains", return_value=[{"slug": "builder-01", "name": "builder-01", "raw_state": "running", "status": "running", "ip_addresses": ["192.168.122.248"]}]),
+                patch("vpsdash.platform_service.inspect_doplet_runtime", return_value={"exists": True, "raw_state": "running", "status": "running", "ip_addresses": ["192.168.122.248"]}),
+            ):
+                result = service.reconcile_runtime_state(force=True)
+                bootstrap = service.bootstrap()
+            self.assertEqual(result["imported"], 1)
+            imported = next(item for item in bootstrap["doplets"] if item["slug"] == "builder-01")
+            self.assertEqual(imported["status"], "running")
+            self.assertEqual(imported["ip_addresses"], ["192.168.122.248"])
+            self.assertTrue(imported["metadata_json"].get("orphan_imported"))
+            self.assertEqual(imported["host_id"], host["id"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_runtime_reconcile_refreshes_windows_local_access_endpoint(self) -> None:
+        root = self._isolated_root()
+        try:
+            service = PlatformService(root)
+            host = service.upsert_host({"name": "Host A", "host_mode": "windows-local", "wsl_distribution": "Ubuntu"})
+            doplet = service.upsert_doplet(
+                {
+                    "name": "VM1",
+                    "host_id": host["id"],
+                    "status": "running",
+                    "vcpu": 1,
+                    "ram_mb": 1024,
+                    "disk_gb": 20,
+                }
+            )
+            with (
+                patch("vpsdash.platform_service.inspect_host_domains", return_value=[{"slug": doplet["slug"], "name": doplet["name"], "raw_state": "running", "status": "running", "ip_addresses": ["192.168.122.77"]}]),
+                patch("vpsdash.platform_service.describe_doplet_terminal", return_value={"ip_addresses": ["192.168.122.77"], "access_label": "SSH ubuntu@127.0.0.1:22001", "preview_command": "ssh -p 22001 ubuntu@127.0.0.1", "forward_host": "127.0.0.1", "forward_port": 22001, "access_note": "Forwarded", "transport": "ssh", "target": "127.0.0.1"}),
+            ):
+                service.reconcile_runtime_state(force=True)
+                bootstrap = service.bootstrap()
+            live = next(item for item in bootstrap["doplets"] if item["id"] == doplet["id"])
+            access = dict(live["metadata_json"].get("access") or {})
+            self.assertEqual(access.get("forward_host"), "127.0.0.1")
+            self.assertEqual(access.get("forward_port"), 22001)
+            self.assertEqual(access.get("preview_command"), "ssh -p 22001 ubuntu@127.0.0.1")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_runtime_reconcile_scans_duplicate_local_runtime_only_once(self) -> None:
+        root = self._isolated_root()
+        try:
+            service = PlatformService(root)
+            first = service.upsert_host({"name": "Host A", "host_mode": "windows-local", "wsl_distribution": "Ubuntu", "status": "ready"})
+            second = service.upsert_host({"name": "Host B", "host_mode": "windows-local", "wsl_distribution": "Ubuntu", "status": "draft"})
+            with patch(
+                "vpsdash.platform_service.inspect_host_domains",
+                return_value=[{"slug": "builder-01", "name": "builder-01", "raw_state": "running", "status": "running", "ip_addresses": ["192.168.122.248"]}],
+            ) as inspect_mock:
+                result = service.reconcile_runtime_state(force=True)
+                bootstrap = service.bootstrap()
+            self.assertEqual(result["imported"], 1)
+            self.assertEqual(inspect_mock.call_count, 1)
+            live = [item for item in bootstrap["doplets"] if item["slug"] == "builder-01"]
+            self.assertEqual(len(live), 1)
+            self.assertEqual(live[0]["host_id"], first["id"])
+            skipped_host = next(item for item in bootstrap["hosts"] if item["id"] == second["id"])
+            self.assertTrue((skipped_host.get("inventory") or {}).get("runtime_scan_skipped_duplicate_of"))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_runtime_reconcile_archives_stale_suffix_imports_for_same_runtime_domain(self) -> None:
+        root = self._isolated_root()
+        try:
+            service = PlatformService(root)
+            host = service.upsert_host({"name": "Host A", "host_mode": "windows-local", "wsl_distribution": "Ubuntu", "status": "ready"})
+            service.upsert_doplet({"name": "builder-01", "slug": "builder-01", "host_id": host["id"], "status": "running", "vcpu": 1, "ram_mb": 1024, "disk_gb": 20})
+            stale = service.upsert_doplet({"name": "builder-01", "slug": "builder-01-2", "host_id": host["id"], "status": "missing", "vcpu": 1, "ram_mb": 1024, "disk_gb": 20})
+            with session_scope(service.session_factory) as session:
+                from vpsdash.models import Doplet as DopletModel
+                duplicate = session.get(DopletModel, stale["id"])
+                duplicate.metadata_json = {"orphan_imported": True}
+            with patch(
+                "vpsdash.platform_service.inspect_host_domains",
+                return_value=[{"slug": "builder-01", "name": "builder-01", "raw_state": "running", "status": "running", "ip_addresses": ["192.168.122.248"]}],
+            ):
+                service.reconcile_runtime_state(force=True)
+                bootstrap = service.bootstrap()
+            archived = next(item for item in bootstrap["archived_doplets"] if item["slug"] == "builder-01-2")
+            self.assertEqual(archived["status"], "deleted")
+            self.assertEqual((archived["metadata_json"] or {}).get("superseded_by_runtime_slug"), "builder-01")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_runtime_reconcile_revives_deleted_doplet_if_domain_still_exists(self) -> None:
+        root = self._isolated_root()
+        try:
+            service = PlatformService(root)
+            host = service.upsert_host({"name": "Host A", "host_mode": "windows-local", "wsl_distribution": "Ubuntu"})
+            doplet = service.upsert_doplet({"name": "VM1", "host_id": host["id"], "status": "deleted", "vcpu": 1, "ram_mb": 1024, "disk_gb": 20})
+            with patch(
+                "vpsdash.platform_service.inspect_host_domains",
+                return_value=[{"slug": doplet["slug"], "name": doplet["name"], "raw_state": "running", "status": "running", "ip_addresses": ["192.168.122.199"]}],
+            ):
+                result = service.reconcile_runtime_state(force=True)
+                bootstrap = service.bootstrap()
+            self.assertEqual(result["revived"], 1)
+            live = next(item for item in bootstrap["doplets"] if item["slug"] == doplet["slug"])
+            self.assertEqual(live["status"], "running")
+            self.assertEqual(live["ip_addresses"], ["192.168.122.199"])
+            self.assertEqual(live["deleted_at"], "")
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -308,13 +426,14 @@ class PlatformTests(unittest.TestCase):
                 connection.close()
 
             service = PlatformService(root)
-            bootstrap = service.bootstrap()
+            with patch("vpsdash.platform_service.inspect_host_domains", return_value=[]):
+                bootstrap = service.bootstrap()
             self.assertEqual(bootstrap["counts"]["doplets"], 1)
             self.assertEqual(bootstrap["counts"]["snapshots"], 1)
             self.assertEqual(bootstrap["counts"]["tasks"], 1)
             self.assertEqual(bootstrap["doplets"][0]["slug"], "legacy-vm")
             self.assertEqual(bootstrap["tasks"][0]["target_type"], "doplet")
-            self.assertIn("doplet", bootstrap["audit"][0]["action"])
+            self.assertTrue(any("doplet" in str(item.get("action") or "") for item in bootstrap["audit"]))
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
