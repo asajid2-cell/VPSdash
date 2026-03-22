@@ -96,6 +96,29 @@ class PlatformTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_upsert_host_ignores_legacy_string_id_and_reuses_machine_fingerprint(self) -> None:
+        root = self._isolated_root()
+        try:
+            service = PlatformService(root)
+            first = service.upsert_host(
+                {
+                    "name": "This PC",
+                    "host_mode": "windows-local",
+                    "local_machine_fingerprint": "abc123",
+                }
+            )
+            second = service.upsert_host(
+                {
+                    "id": "legacy-host-id",
+                    "name": "This PC",
+                    "host_mode": "windows-local",
+                    "local_machine_fingerprint": "abc123",
+                }
+            )
+            self.assertEqual(first["id"], second["id"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_bootstrap_reconciles_running_doplet_runtime_state(self) -> None:
         root = self._isolated_root()
         try:

@@ -8,8 +8,8 @@ from .execution import is_windows_remote_mode, run_host_local_command, run_remot
 def _local_checks_for_mode(host_mode: str) -> list[dict[str, Any]]:
     if host_mode == "windows-local":
         return [
-            {"title": "PowerShell version", "command": "powershell -NoProfile -Command \"$PSVersionTable.PSVersion.ToString()\"", "timeout": 15, "use_wsl": False},
-            {"title": "WSL distros", "command": "powershell -NoProfile -Command \"wsl -l -v\"", "timeout": 20, "use_wsl": False},
+            {"title": "Windows host", "command": "hostname", "timeout": 15, "use_wsl": False},
+            {"title": "WSL distros", "command": "wsl.exe -l -v", "timeout": 20, "use_wsl": False},
             {"title": "WSL user", "command": "whoami", "timeout": 10},
             {"title": "WSL kernel", "command": "uname -a", "timeout": 15},
             {"title": "WSL libvirt", "command": "virsh uri || true", "timeout": 15},
@@ -48,8 +48,8 @@ def run_diagnostics(host: dict[str, Any], project: dict[str, Any] | None = None)
         if is_windows_remote_mode(host):
             remote_checks.extend(
                 [
-                    {"title": "Remote Windows host", "command": 'powershell -NoProfile -Command "$env:COMPUTERNAME"', "timeout": 15, "use_wsl": False},
-                    {"title": "WSL distros", "command": 'powershell -NoProfile -Command "wsl -l -v"', "timeout": 20, "use_wsl": False},
+                    {"title": "Remote Windows host", "command": "hostname", "timeout": 15, "use_wsl": False},
+                    {"title": "WSL distros", "command": "wsl.exe -l -v", "timeout": 20, "use_wsl": False},
                 ]
             )
         remote_checks.extend(
@@ -102,7 +102,7 @@ def run_monitor_snapshot(host: dict[str, Any], project: dict[str, Any] | None = 
             }
         snapshot_commands: dict[str, dict[str, Any]] = {}
         if is_windows_remote_mode(host):
-            snapshot_commands["wsl"] = {"command": 'powershell -NoProfile -Command "wsl -l -v"', "use_wsl": False}
+            snapshot_commands["wsl"] = {"command": "wsl.exe -l -v", "use_wsl": False}
         snapshot_commands.update({
             "uptime": "uptime",
             "memory": "free -h",
@@ -125,8 +125,8 @@ def run_monitor_snapshot(host: dict[str, Any], project: dict[str, Any] | None = 
 
     if host_mode == "windows-local":
         snapshot_commands = {
-            "system": {"command": "powershell -NoProfile -Command \"Get-CimInstance Win32_OperatingSystem | Select-Object TotalVisibleMemorySize,FreePhysicalMemory\"", "use_wsl": False},
-            "wsl": {"command": "powershell -NoProfile -Command \"wsl -l -v\"", "use_wsl": False},
+            "system": {"command": "hostname", "use_wsl": False},
+            "wsl": {"command": "wsl.exe -l -v", "use_wsl": False},
             "docker": {"command": "docker ps"},
             "libvirt": {"command": "virsh list --all || true"},
         }

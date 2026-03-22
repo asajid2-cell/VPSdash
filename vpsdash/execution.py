@@ -50,6 +50,23 @@ def run_local_command(command: str, timeout: int = 60) -> dict[str, Any]:
     }
 
 
+def run_local_argv(argv: list[str], timeout: int = 60) -> dict[str, Any]:
+    completed = subprocess.run(
+        argv,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        **_subprocess_kwargs(),
+    )
+    return {
+        "ok": completed.returncode == 0,
+        "returncode": completed.returncode,
+        "stdout": completed.stdout,
+        "stderr": completed.stderr,
+        "command": subprocess.list2cmdline(argv),
+    }
+
+
 def run_local_command_bytes(command: str, timeout: int = 60) -> dict[str, Any]:
     completed = subprocess.run(
         command,
@@ -269,6 +286,11 @@ def run_host_local_command(
 ) -> dict[str, Any]:
     if _should_use_wsl(host, use_wsl, remote=False):
         return run_local_command(build_wsl_command(host, command, as_root=run_as_root), timeout=timeout)
+    stripped = str(command or "").strip()
+    if platform.system().lower().startswith("win") and not run_as_root:
+        lowered = stripped.lower()
+        if lowered == "hostname" or lowered.startswith("wsl.exe "):
+            return run_local_argv(shlex.split(stripped, posix=False), timeout=timeout)
     if run_as_root and not platform.system().lower().startswith("win"):
         return run_local_command(_wrap_root_shell_command(command), timeout=timeout)
     return run_local_command(command, timeout=timeout)

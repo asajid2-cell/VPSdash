@@ -688,7 +688,10 @@ class PlatformService:
             requested_slug = _slugify(payload.get("slug") or payload.get("name") or "host")
             local_machine_fingerprint = str(payload.get("local_machine_fingerprint") or "").strip()
             if host_id:
-                host = session.get(HostNode, int(host_id))
+                try:
+                    host = session.get(HostNode, int(host_id))
+                except (TypeError, ValueError):
+                    host = None
             if host is None and local_machine_fingerprint:
                 for candidate in session.scalars(select(HostNode)).all():
                     config = dict(((candidate.inventory or {}).get("config") or {}))

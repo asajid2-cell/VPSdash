@@ -497,6 +497,7 @@ class DesktopTests(unittest.TestCase):
             window.service.capture_platform_host_inventory = MagicMock(return_value={"host": {"id": 5}})
             window.service.queue_prepare_platform_host = MagicMock(return_value={"id": 17, "status": "planned"})
             window.service.launch_platform_task = MagicMock(return_value={"id": 17, "status": "queued"})
+            window._windows_local_wsl_state = MagicMock(return_value={"distro": "Ubuntu", "distro_exists": True, "distro_ready": True, "list_output": "Ubuntu"})
 
             result = window._perform_local_initial_setup({"name": "This PC", "mode": "windows-local", "wsl_distribution": "Ubuntu"})
 
@@ -518,10 +519,41 @@ class DesktopTests(unittest.TestCase):
                 return_value={"id": 5, "status": "ready", "inventory": {"resources": {"virtualization_ready": True}}}
             )
             window._launch_queued_platform_task = MagicMock()
+            window._windows_local_wsl_state = MagicMock(return_value={"distro": "Ubuntu", "distro_exists": True, "distro_ready": True, "list_output": "Ubuntu"})
 
             result = window._perform_local_initial_setup({"name": "This PC", "mode": "windows-local", "wsl_distribution": "Ubuntu"})
 
             self.assertTrue(result["prepare"]["skipped"])
+            window._launch_queued_platform_task.assert_not_called()
+        finally:
+            window.close()
+
+    def test_initial_setup_respects_mode_key_for_windows_local_wsl_pending(self) -> None:
+        window = VpsDashWindow(VpsDashService(self.root))
+        try:
+            window._project_source_setup_commands = MagicMock(return_value=None)
+            window._project_source_setup_needs_install = MagicMock(return_value=None)
+            window.service.upsert_platform_host = MagicMock(
+                side_effect=[
+                    {"id": 5, "name": "This PC", "mode": "windows-local", "wsl_distribution": "Ubuntu", "status": "queued"},
+                    {"id": 5, "name": "This PC", "mode": "windows-local", "wsl_distribution": "Ubuntu", "status": "queued"},
+                ]
+            )
+            window._windows_local_wsl_state = MagicMock(
+                side_effect=[
+                    {"distro": "Ubuntu", "distro_exists": False, "distro_ready": False, "list_output": ""},
+                    {"distro": "Ubuntu", "distro_exists": False, "distro_ready": False, "list_output": ""},
+                ]
+            )
+            window._install_windows_local_wsl = MagicMock(return_value={"ok": True, "reboot_required": True, "stdout": "", "stderr": ""})
+            window.service.capture_platform_host_inventory = MagicMock()
+            window._launch_queued_platform_task = MagicMock()
+
+            result = window._perform_local_initial_setup({"name": "This PC", "mode": "windows-local", "wsl_distribution": "Ubuntu"})
+
+            self.assertTrue(result["prepare"]["pending"])
+            self.assertEqual(result["prepare"]["reason"], "wsl-not-ready")
+            window.service.capture_platform_host_inventory.assert_not_called()
             window._launch_queued_platform_task.assert_not_called()
         finally:
             window.close()

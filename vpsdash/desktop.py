@@ -5,6 +5,7 @@ import hashlib
 import inspect
 import json
 import os
+import subprocess
 import sys
 import traceback
 import webbrowser
@@ -61,6 +62,33 @@ from .execution import run_local_command
 ACTIVE_PLATFORM_TASK_STATUSES = {"planned", "queued", "running", "cancel-requested"}
 RETRYABLE_PLATFORM_TASK_STATUSES = {"failed", "cancelled"}
 ARCHIVED_PLATFORM_TASK_STATUSES = {"cancelled", "complete", "completed"}
+
+
+def _windows_subprocess_kwargs() -> dict[str, Any]:
+    kwargs: dict[str, Any] = {}
+    if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW"):
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        kwargs["startupinfo"] = startupinfo
+    return kwargs
+
+
+def _run_windows_native_command(argv: list[str], timeout: int = 60) -> dict[str, Any]:
+    completed = subprocess.run(
+        argv,
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+        **_windows_subprocess_kwargs(),
+    )
+    return {
+        "ok": completed.returncode == 0,
+        "returncode": completed.returncode,
+        "stdout": completed.stdout.decode("utf-8", errors="replace"),
+        "stderr": completed.stderr.decode("utf-8", errors="replace"),
+        "command": subprocess.list2cmdline(argv),
+    }
 
 
 def _resource_root() -> Path:
@@ -3997,6 +4025,12 @@ class VpsDashWindow(QMainWindow):
         if not host_id:
             self._set_status("Choose a host first", 3000)
             return
+        selected_host = next((item for item in self._control_plane_hosts() if int(item.get("id", 0)) == int(host_id)), None)
+        if selected_host and str(selected_host.get("host_mode") or selected_host.get("mode") or "").strip().lower() == "windows-local":
+            wsl_state = self._windows_local_wsl_state(selected_host)
+            if not wsl_state.get("distro_ready"):
+                self._set_status("WSL is not ready yet on this machine. Run Initial Setup first and finish any WSL install/reboot prompts.", 7000)
+                return
         self._run_async_task(
             start_message=f"Preparing host {host_id}...",
             work=lambda: self._launch_queued_platform_task(
@@ -4396,7 +4430,7 @@ class VpsDashWindow(QMainWindow):
 
     def _windows_local_wsl_state(self, host_payload: dict[str, Any]) -> dict[str, Any]:
         distro = str(host_payload.get("wsl_distribution") or "Ubuntu").strip() or "Ubuntu"
-        list_result = run_local_command('powershell -NoProfile -Command "wsl -l -v"', timeout=60)
+        list_result = _run_windows_native_command(["wsl.exe", "-l", "-v"], timeout=60)
         stdout = str(list_result.get("stdout") or "")
         stderr = str(list_result.get("stderr") or "")
         combined = f"{stdout}\n{stderr}".strip()
@@ -4410,8 +4444,8 @@ class VpsDashWindow(QMainWindow):
         ready_result = None
         distro_ready = False
         if distro_exists:
-            ready_result = run_local_command(
-                f'wsl.exe -d {distro} -- bash -lc "echo __VPSDASH_WSL_READY__"',
+            ready_result = _run_windows_native_command(
+                ["wsl.exe", "-d", distro, "--", "bash", "-lc", "echo __VPSDASH_WSL_READY__"],
                 timeout=60,
             )
             distro_ready = bool(ready_result.get("ok")) and "__VPSDASH_WSL_READY__" in str(ready_result.get("stdout") or "")
@@ -4426,14 +4460,11 @@ class VpsDashWindow(QMainWindow):
 
     def _install_windows_local_wsl(self, host_payload: dict[str, Any]) -> dict[str, Any]:
         distro = str(host_payload.get("wsl_distribution") or "Ubuntu").strip() or "Ubuntu"
-        escaped_distro = distro.replace("'", "''")
-        install_command = (
-            'powershell -NoProfile -Command '
-            f'"$d=\'{escaped_distro}\'; '
-            '$names=@(wsl -l -q 2>$null | ForEach-Object { $_.Trim() } | Where-Object { $_ }); '
-            'if ($names -notcontains $d) { wsl --install -d $d } else { Write-Output \'WSL distro already present.\' }"'
-        )
-        result = run_local_command(install_command, timeout=2400)
+        list_result = _run_windows_native_command(["wsl.exe", "-l", "-q"], timeout=60)
+        existing = [line.strip().replace("\x00", "") for line in str(list_result.get("stdout") or "").splitlines() if line.strip()]
+        if any(item.lower() == distro.lower() for item in existing):
+            return {"ok": True, "reboot_required": False, "stdout": "WSL distro already present.", "stderr": ""}
+        result = _run_windows_native_command(["wsl.exe", "--install", "-d", distro], timeout=2400)
         text = f"{result.get('stdout', '')}\n{result.get('stderr', '')}".lower()
         reboot_required = any(token in text for token in ("restart", "reboot", "needs to be restarted", "changes will not take effect"))
         return {**result, "reboot_required": reboot_required}
@@ -4444,6 +4475,7 @@ class VpsDashWindow(QMainWindow):
                 progress_cb(percent, message)
 
         result: dict[str, Any] = {"source_env": None, "host": None, "inventory": None, "prepare": None, "setup": {}}
+        host_mode = str(host_payload.get("host_mode") or host_payload.get("mode") or "").strip().lower()
         emit(5, "Checking local prerequisites...")
         source_state = self._project_source_setup_needs_install()
         source_commands = self._project_source_setup_commands()
@@ -4473,12 +4505,15 @@ class VpsDashWindow(QMainWindow):
             }
 
         emit(28, "Saving local host profile...")
-        host = self.service.upsert_platform_host(host_payload, actor="desktop")
+        host = self.service.upsert_platform_host(
+            self._control_plane_host_payload(host_payload, status="queued" if host_mode in {"windows-local", "linux-local"} else None),
+            actor="desktop",
+        )
         host_id = int(host.get("id", 0))
         if host_id <= 0:
             raise RuntimeError("Initial setup could not save the local host profile.")
 
-        if str(host_payload.get("host_mode") or "").strip().lower() == "windows-local":
+        if host_mode == "windows-local":
             emit(38, "Checking Windows and WSL prerequisites...")
             wsl_state = self._windows_local_wsl_state(host_payload)
             result["setup"]["wsl"] = {
@@ -4506,13 +4541,7 @@ class VpsDashWindow(QMainWindow):
                 )
                 if not follow_up["distro_ready"]:
                     host = self.service.upsert_platform_host(
-                        {
-                            "id": host_id,
-                            "name": host.get("name"),
-                            "host_mode": host.get("host_mode"),
-                            "wsl_distribution": host.get("wsl_distribution"),
-                            "status": "queued",
-                        },
+                        self._control_plane_host_payload(host, status="queued"),
                         actor="desktop",
                     )
                     result["host"] = host
@@ -4535,26 +4564,14 @@ class VpsDashWindow(QMainWindow):
         if bool(resources.get("virtualization_ready")):
             emit(100, "Local host is ready for Doplets.")
             host = self.service.upsert_platform_host(
-                {
-                    "id": host_id,
-                    "name": host.get("name"),
-                    "host_mode": host.get("host_mode"),
-                    "wsl_distribution": host.get("wsl_distribution"),
-                    "status": "ready",
-                },
+                self._control_plane_host_payload(host, status="ready"),
                 actor="desktop",
             )
             prepare = {"skipped": True, "status": "ready"}
         else:
             emit(78, "Preparing the local hypervisor stack...")
             host = self.service.upsert_platform_host(
-                {
-                    "id": host_id,
-                    "name": host.get("name"),
-                    "host_mode": host.get("host_mode"),
-                    "wsl_distribution": host.get("wsl_distribution"),
-                    "status": "provisioning",
-                },
+                self._control_plane_host_payload(host, status="provisioning"),
                 actor="desktop",
             )
             prepare = self._launch_queued_platform_task(
@@ -5228,6 +5245,39 @@ class VpsDashWindow(QMainWindow):
             "local_machine_fingerprint": str((self.local_machine or {}).get("machine_fingerprint") or "").strip(),
         }
 
+    def _matching_control_plane_host(self, host_payload: dict[str, Any]) -> dict[str, Any] | None:
+        fingerprint = str(host_payload.get("local_machine_fingerprint") or "").strip()
+        mode = str(host_payload.get("host_mode") or host_payload.get("mode") or "").strip().lower()
+        ssh_host = str(host_payload.get("ssh_host") or "").strip().lower()
+        ssh_user = str(host_payload.get("ssh_user") or "").strip().lower()
+        name = str(host_payload.get("name") or "").strip().lower()
+        for host in self._control_plane_hosts():
+            config = dict((host.get("config") or {}))
+            if fingerprint and str(config.get("local_machine_fingerprint") or "").strip() == fingerprint:
+                return host
+            if (
+                str(host.get("host_mode") or host.get("mode") or "").strip().lower() == mode
+                and str(host.get("ssh_host") or "").strip().lower() == ssh_host
+                and str(host.get("ssh_user") or "").strip().lower() == ssh_user
+                and str(host.get("name") or "").strip().lower() == name
+            ):
+                return host
+        return None
+
+    def _control_plane_host_payload(self, host_payload: dict[str, Any], *, status: str | None = None) -> dict[str, Any]:
+        payload = dict(host_payload or {})
+        mode = str(payload.get("host_mode") or payload.get("mode") or "").strip()
+        if mode:
+            payload["host_mode"] = mode
+        host_id = _coerce_int(payload.get("id"), 0)
+        if host_id > 0:
+            payload["id"] = host_id
+        else:
+            payload.pop("id", None)
+        if status:
+            payload["status"] = status
+        return payload
+
     def _collect_project(self) -> dict[str, Any]:
         env_items: list[dict[str, Any]] = []
         for row in range(self.env_table.rowCount()):
@@ -5457,7 +5507,16 @@ class VpsDashWindow(QMainWindow):
         try:
             host_payload = self._collect_host()
             legacy_response = self.service.upsert_host(host_payload)
-            platform_host = self.service.upsert_platform_host(host_payload, actor="desktop")
+            existing_platform_host = self._matching_control_plane_host(host_payload)
+            existing_status = str((existing_platform_host or {}).get("status") or "").strip().lower()
+            host_mode = str(host_payload.get("mode") or "").strip().lower()
+            requested_status = existing_status if existing_status in {"ready", "provisioning", "queued"} else None
+            if not requested_status and host_mode in {"windows-local", "linux-local"}:
+                requested_status = "queued"
+            platform_host = self.service.upsert_platform_host(
+                self._control_plane_host_payload(host_payload, status=requested_status),
+                actor="desktop",
+            )
             self.current_host = legacy_response["host"]
             self.hosts = legacy_response["state"]["hosts"]
             self._populate_hosts()

@@ -60,11 +60,11 @@ def _windows_native_steps(host: dict[str, Any]) -> list[dict[str, Any]]:
         return []
     distro = str(host.get("wsl_distribution") or "Ubuntu").strip() or "Ubuntu"
     run_mode = _run_mode_for_host(host)
-    escaped_distro = distro.replace("'", "''")
+    escaped_distro = distro.replace('"', '\\"')
     return [
         CommandStep(
             "Check WSL installation",
-            'powershell -NoProfile -Command "wsl -l -v"',
+            'cmd.exe /d /s /c "(wsl.exe -l -v) 2>&1 & exit /b 0"',
             run_mode,
             detail="Inspect the Windows-side WSL installation and installed distros.",
             timeout=60,
@@ -72,12 +72,7 @@ def _windows_native_steps(host: dict[str, Any]) -> list[dict[str, Any]]:
         ).as_dict(),
         CommandStep(
             "Install WSL distro if missing",
-            (
-                'powershell -NoProfile -Command '
-                f'"$d=\'{escaped_distro}\'; '
-                '$names=@(wsl -l -q 2>$null | ForEach-Object { $_.Trim() } | Where-Object { $_ }); '
-                'if ($names -notcontains $d) { wsl --install -d $d }"'
-            ),
+            f'cmd.exe /d /s /c "(wsl.exe -l -q | findstr /ix /c:\\"{escaped_distro}\\" >nul) || wsl.exe --install -d \\"{escaped_distro}\\""',
             run_mode,
             detail="Ensure the selected WSL distro exists before Linux-side hypervisor setup starts.",
             risky=True,
@@ -392,7 +387,6 @@ def host_prepare_plan(host: dict[str, Any]) -> list[dict[str, Any]]:
         _runtime_path(host, "networks"),
     ]
     steps = [
-        *_windows_native_steps(host),
         CommandStep("Refresh package metadata", f"{package_prefix} update", run_mode, timeout=600, run_as_root=_needs_root(host)),
         CommandStep(
             "Install hypervisor stack",
@@ -523,8 +517,8 @@ def inventory_snapshot(host: dict[str, Any]) -> dict[str, Any]:
         )},
     }
     if _is_windows_host(host):
-        commands["windows_host"] = {"command": 'powershell -NoProfile -Command "$env:COMPUTERNAME"', "use_wsl": False}
-        commands["wsl_list"] = {"command": 'powershell -NoProfile -Command "wsl -l -v"', "use_wsl": False}
+        commands["windows_host"] = {"command": "hostname", "use_wsl": False}
+        commands["wsl_list"] = {"command": "wsl.exe -l -v", "use_wsl": False}
     results: dict[str, Any] = {}
     host_mode = str(host.get("mode") or host.get("host_mode") or "").strip().lower()
     is_remote = host_mode in {"remote-linux", "windows-remote", "windows-wsl-remote"}

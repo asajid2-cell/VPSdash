@@ -1,10 +1,22 @@
 import unittest
 from unittest.mock import patch
 
-from vpsdash.execution import describe_doplet_terminal
+from vpsdash.execution import describe_doplet_terminal, run_host_local_command
 
 
 class ExecutionTests(unittest.TestCase):
+    def test_windows_local_wsl_probe_uses_native_argv_runner(self) -> None:
+        host = {"mode": "windows-local", "wsl_distribution": "Ubuntu"}
+        with (
+            patch("vpsdash.execution.platform.system", return_value="Windows"),
+            patch("vpsdash.execution.run_local_argv", return_value={"ok": True, "stdout": "Ubuntu", "stderr": "", "command": "wsl.exe -l -v"}) as argv_mock,
+            patch("vpsdash.execution.run_local_command") as shell_mock,
+        ):
+            result = run_host_local_command(host, "wsl.exe -l -v", use_wsl=False, timeout=20)
+        argv_mock.assert_called_once()
+        shell_mock.assert_not_called()
+        self.assertTrue(result["ok"])
+
     def test_windows_local_terminal_prefers_ssh_when_ip_is_discovered(self) -> None:
         host = {"mode": "windows-local", "wsl_distribution": "Ubuntu"}
         doplet = {"id": 41, "slug": "builder-01", "name": "Builder 01", "status": "running", "bootstrap_user": "ubuntu", "ip_addresses": []}
