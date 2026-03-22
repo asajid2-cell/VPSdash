@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import getpass
+import hashlib
 import os
 import platform
 import socket
@@ -149,6 +150,9 @@ def local_machine_info() -> dict[str, Any]:
         wsl_distributions[0] if wsl_distributions else "Ubuntu"
     )
     ssh_targets = [item for item in [hostname, fqdn, *ip_candidates] if item]
+    machine_fingerprint = hashlib.sha256(
+        f"{hostname}|{fqdn}|{getpass.getuser()}|{platform.system()}|{platform.release()}".encode("utf-8")
+    ).hexdigest()[:16]
 
     return {
         "hostname": hostname,
@@ -160,6 +164,7 @@ def local_machine_info() -> dict[str, Any]:
         "ssh_public_keys": public_key_candidates(),
         "wsl_distributions": wsl_distributions,
         "recommended_wsl_distribution": preferred_wsl,
+        "machine_fingerprint": machine_fingerprint,
     }
 
 

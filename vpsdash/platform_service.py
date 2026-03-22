@@ -686,8 +686,15 @@ class PlatformService:
             host = None
             host_id = payload.get("id")
             requested_slug = _slugify(payload.get("slug") or payload.get("name") or "host")
+            local_machine_fingerprint = str(payload.get("local_machine_fingerprint") or "").strip()
             if host_id:
                 host = session.get(HostNode, int(host_id))
+            if host is None and local_machine_fingerprint:
+                for candidate in session.scalars(select(HostNode)).all():
+                    config = dict(((candidate.inventory or {}).get("config") or {}))
+                    if str(config.get("local_machine_fingerprint") or "").strip() == local_machine_fingerprint:
+                        host = candidate
+                        break
             if host is None:
                 host = session.scalar(select(HostNode).where(HostNode.slug == requested_slug))
             if host is None:
@@ -729,6 +736,7 @@ class PlatformService:
                 ("lvm_vg", "lvm_vg"),
                 ("lvm_thinpool", "lvm_thinpool"),
                 ("libvirt_network", "libvirt_network"),
+                ("local_machine_fingerprint", "local_machine_fingerprint"),
             ):
                 if payload.get(source_key) not in {None, ""}:
                     config[config_key] = payload.get(source_key)

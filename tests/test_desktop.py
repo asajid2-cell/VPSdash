@@ -201,6 +201,92 @@ class DesktopTests(unittest.TestCase):
         finally:
             window.close()
 
+    def test_initial_setup_marks_wsl_install_pending_instead_of_poisoning_host(self) -> None:
+        window = VpsDashWindow(VpsDashService(self.root))
+        try:
+            progress_updates: list[tuple[int, str]] = []
+            host_payload = {
+                "name": "DESKTOP",
+                "host_mode": "windows-local",
+                "wsl_distribution": "Ubuntu",
+            }
+            with (
+                patch.object(window, "_project_source_setup_needs_install", return_value=None),
+                patch.object(window, "_project_source_setup_commands", return_value=None),
+                patch.object(
+                    window.service,
+                    "upsert_platform_host",
+                    side_effect=[
+                        {"id": 1, "name": "DESKTOP", "host_mode": "windows-local", "wsl_distribution": "Ubuntu", "status": "draft"},
+                        {"id": 1, "name": "DESKTOP", "host_mode": "windows-local", "wsl_distribution": "Ubuntu", "status": "queued"},
+                    ],
+                ),
+                patch.object(
+                    window,
+                    "_windows_local_wsl_state",
+                    side_effect=[
+                        {"distro": "Ubuntu", "distro_exists": False, "distro_ready": False, "list_output": ""},
+                        {"distro": "Ubuntu", "distro_exists": False, "distro_ready": False, "list_output": ""},
+                    ],
+                ),
+                patch.object(
+                    window,
+                    "_install_windows_local_wsl",
+                    return_value={"ok": True, "reboot_required": True, "stdout": "restart required", "stderr": ""},
+                ),
+            ):
+                result = window._perform_local_initial_setup_with_progress(
+                    host_payload,
+                    lambda percent, message: progress_updates.append((percent, message)),
+                )
+            self.assertTrue(result["prepare"]["pending"])
+            self.assertTrue(result["prepare"]["reboot_required"])
+            self.assertEqual(result["host"]["status"], "queued")
+            self.assertEqual(progress_updates[-1][0], 100)
+        finally:
+            window.close()
+
+    def test_initial_setup_marks_host_ready_when_virtualization_is_already_ready(self) -> None:
+        window = VpsDashWindow(VpsDashService(self.root))
+        try:
+            progress_updates: list[tuple[int, str]] = []
+            host_payload = {
+                "name": "DESKTOP",
+                "host_mode": "windows-local",
+                "wsl_distribution": "Ubuntu",
+            }
+            with (
+                patch.object(window, "_project_source_setup_needs_install", return_value=None),
+                patch.object(window, "_project_source_setup_commands", return_value=None),
+                patch.object(
+                    window.service,
+                    "upsert_platform_host",
+                    side_effect=[
+                        {"id": 1, "name": "DESKTOP", "host_mode": "windows-local", "wsl_distribution": "Ubuntu", "status": "draft"},
+                        {"id": 1, "name": "DESKTOP", "host_mode": "windows-local", "wsl_distribution": "Ubuntu", "status": "ready"},
+                    ],
+                ),
+                patch.object(
+                    window,
+                    "_windows_local_wsl_state",
+                    return_value={"distro": "Ubuntu", "distro_exists": True, "distro_ready": True, "list_output": "Ubuntu"},
+                ),
+                patch.object(
+                    window.service,
+                    "capture_platform_host_inventory",
+                    return_value={"inventory": {"resources": {"virtualization_ready": True}}},
+                ),
+            ):
+                result = window._perform_local_initial_setup_with_progress(
+                    host_payload,
+                    lambda percent, message: progress_updates.append((percent, message)),
+                )
+            self.assertEqual(result["prepare"]["status"], "ready")
+            self.assertEqual(result["host"]["status"], "ready")
+            self.assertEqual(progress_updates[-1][0], 100)
+        finally:
+            window.close()
+
     def test_loading_default_prefills_host_bootstrap_fields(self) -> None:
         window = VpsDashWindow(VpsDashService(self.root))
         try:
