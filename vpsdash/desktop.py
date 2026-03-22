@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import traceback
 import webbrowser
 import ctypes
@@ -4469,6 +4470,68 @@ class VpsDashWindow(QMainWindow):
         reboot_required = any(token in text for token in ("restart", "reboot", "needs to be restarted", "changes will not take effect"))
         return {**result, "reboot_required": reboot_required}
 
+    def _run_initial_setup_step_with_retries(
+        self,
+        title: str,
+        operation: Any,
+        *,
+        emit: Any,
+        attempts: int = 3,
+        delay_seconds: float = 2.0,
+        success_check: Any | None = None,
+        error_detail: Any | None = None,
+    ) -> Any:
+        last_error = "Unknown error"
+        for attempt in range(1, attempts + 1):
+            try:
+                result = operation()
+                ok = bool(success_check(result) if success_check else True)
+                if ok:
+                    return result
+                if callable(error_detail):
+                    last_error = str(error_detail(result) or last_error)
+                elif isinstance(result, dict):
+                    last_error = str(result.get("stderr") or result.get("stdout") or last_error)
+                else:
+                    last_error = str(result)
+            except Exception as exc:
+                last_error = str(exc)
+            if attempt < attempts:
+                emit(0, f"{title} hit an error. Retrying ({attempt + 1}/{attempts})...")
+                time.sleep(delay_seconds)
+        raise RuntimeError(f"{title} failed after {attempts} attempts. {last_error}".strip())
+
+    def _run_prepare_host_until_complete(self, host_id: int, emit: Any) -> dict[str, Any]:
+        queued = self.service.queue_prepare_platform_host(host_id, actor="desktop")
+        task_id = int(queued.get("id", 0))
+        if task_id <= 0:
+            raise RuntimeError("Prepare Host did not return a valid task id.")
+        attempts = 3
+        current_task_id = task_id
+        last_result: dict[str, Any] | None = None
+        for attempt in range(1, attempts + 1):
+            emit(84, f"Preparing the local hypervisor stack ({attempt}/{attempts})...")
+            last_result = self.service.run_platform_task(current_task_id, actor="desktop", dry_run=False)
+            status = str((last_result or {}).get("status") or "").strip().lower()
+            if status in {"succeeded", "complete", "completed"}:
+                payload = dict(last_result or {})
+                payload["task_id"] = current_task_id
+                payload["completed"] = True
+                return payload
+            if attempt < attempts:
+                emit(88, f"Prepare Host failed once. Retrying ({attempt + 1}/{attempts})...")
+                retry_task = self.service.retry_platform_task(current_task_id, actor="desktop")
+                current_task_id = int(retry_task.get("id", 0))
+                if current_task_id <= 0:
+                    raise RuntimeError("Prepare Host retry did not return a valid task id.")
+                time.sleep(2.0)
+        detail = ""
+        if isinstance(last_result, dict):
+            detail = str(
+                ((last_result.get("result_payload") or {}).get("results") or last_result.get("log_output") or last_result.get("status") or "")
+            ).strip()
+        raise RuntimeError(f"Prepare Host failed after {attempts} attempts. {detail}".strip())
+
     def _perform_local_initial_setup_with_progress(self, host_payload: dict[str, Any], progress_cb: Any | None) -> dict[str, Any]:
         def emit(percent: int, message: str) -> None:
             if progress_cb is not None:
@@ -4483,14 +4546,22 @@ class VpsDashWindow(QMainWindow):
             create_command, install_command = source_commands
             if source_state["needs_venv"]:
                 emit(10, "Creating local Python environment...")
-                create_result = run_local_command(create_command, timeout=900)
-                if not create_result.get("ok"):
-                    raise RuntimeError(create_result.get("stderr") or "Could not create the local Python virtual environment.")
+                create_result = self._run_initial_setup_step_with_retries(
+                    "Create local Python environment",
+                    lambda: run_local_command(create_command, timeout=900),
+                    emit=emit,
+                    success_check=lambda value: bool((value or {}).get("ok")),
+                    error_detail=lambda value: (value or {}).get("stderr") or (value or {}).get("stdout") or "",
+                )
             if source_state["needs_requirements"]:
                 emit(18, "Installing Python requirements...")
-                install_result = run_local_command(install_command, timeout=1800)
-                if not install_result.get("ok"):
-                    raise RuntimeError(install_result.get("stderr") or "Could not install Python requirements into the local virtual environment.")
+                install_result = self._run_initial_setup_step_with_retries(
+                    "Install Python requirements",
+                    lambda: run_local_command(install_command, timeout=1800),
+                    emit=emit,
+                    success_check=lambda value: bool((value or {}).get("ok")),
+                    error_detail=lambda value: (value or {}).get("stderr") or (value or {}).get("stdout") or "",
+                )
                 source_state["stamp_path"].parent.mkdir(parents=True, exist_ok=True)
                 source_state["stamp_path"].write_text(source_state["requirements_hash"], encoding="utf-8")
             result["source_env"] = {
@@ -4515,7 +4586,14 @@ class VpsDashWindow(QMainWindow):
 
         if host_mode == "windows-local":
             emit(38, "Checking Windows and WSL prerequisites...")
-            wsl_state = self._windows_local_wsl_state(host_payload)
+            wsl_state = self._run_initial_setup_step_with_retries(
+                "Check Windows and WSL prerequisites",
+                lambda: self._windows_local_wsl_state(host_payload),
+                emit=emit,
+                attempts=2,
+                success_check=lambda value: bool(((value or {}).get("list_result") or {}).get("ok")),
+                error_detail=lambda value: ((value or {}).get("list_result") or {}).get("stderr") or ((value or {}).get("list_result") or {}).get("stdout") or "",
+            )
             result["setup"]["wsl"] = {
                 "distro": wsl_state["distro"],
                 "distro_exists": wsl_state["distro_exists"],
@@ -4524,14 +4602,28 @@ class VpsDashWindow(QMainWindow):
             }
             if not wsl_state["distro_exists"] or not wsl_state["distro_ready"]:
                 emit(48, f"Installing or initializing WSL distro {wsl_state['distro']}...")
-                install_result = self._install_windows_local_wsl(host_payload)
+                install_result = self._run_initial_setup_step_with_retries(
+                    f"Install or initialize WSL distro {wsl_state['distro']}",
+                    lambda: self._install_windows_local_wsl(host_payload),
+                    emit=emit,
+                    attempts=2,
+                    success_check=lambda value: bool((value or {}).get("ok")),
+                    error_detail=lambda value: (value or {}).get("stderr") or (value or {}).get("stdout") or "",
+                )
                 result["setup"]["wsl_install"] = {
                     "ok": bool(install_result.get("ok")),
                     "reboot_required": bool(install_result.get("reboot_required")),
                     "stdout": str(install_result.get("stdout") or ""),
                     "stderr": str(install_result.get("stderr") or ""),
                 }
-                follow_up = self._windows_local_wsl_state(host_payload)
+                follow_up = self._run_initial_setup_step_with_retries(
+                    "Re-check WSL runtime after install",
+                    lambda: self._windows_local_wsl_state(host_payload),
+                    emit=emit,
+                    attempts=2,
+                    success_check=lambda value: bool(((value or {}).get("list_result") or {}).get("ok")),
+                    error_detail=lambda value: ((value or {}).get("list_result") or {}).get("stderr") or ((value or {}).get("list_result") or {}).get("stdout") or "",
+                )
                 result["setup"]["wsl"].update(
                     {
                         "distro_exists": follow_up["distro_exists"],
@@ -4559,7 +4651,11 @@ class VpsDashWindow(QMainWindow):
                     return result
 
         emit(62, "Capturing system inventory...")
-        inventory = self.service.capture_platform_host_inventory(host_id, actor="desktop")
+        inventory = self._run_initial_setup_step_with_retries(
+            "Capture system inventory",
+            lambda: self.service.capture_platform_host_inventory(host_id, actor="desktop"),
+            emit=emit,
+        )
         resources = dict((inventory.get("inventory") or {}).get("resources") or {})
         if bool(resources.get("virtualization_ready")):
             emit(100, "Local host is ready for Doplets.")
@@ -4574,11 +4670,8 @@ class VpsDashWindow(QMainWindow):
                 self._control_plane_host_payload(host, status="provisioning"),
                 actor="desktop",
             )
-            prepare = self._launch_queued_platform_task(
-                lambda: self.service.queue_prepare_platform_host(host_id, actor="desktop"),
-                actor="desktop",
-            )
-            emit(100, "Host preparation queued. VPSdash is finishing hypervisor setup in the background.")
+            prepare = self._run_prepare_host_until_complete(host_id, emit)
+            emit(100, "Initial setup finished preparing the local host.")
         result["host"] = host
         result["inventory"] = inventory
         result["prepare"] = prepare
@@ -4618,6 +4711,9 @@ class VpsDashWindow(QMainWindow):
                 "Initial setup started WSL provisioning. Reboot Windows if prompted, then reopen VPSdash and run Initial Setup again.",
             )
             self._set_status("Initial setup started WSL installation. Reboot Windows if required, then rerun Initial Setup.", 9000)
+        elif str(prepare.get("status") or "").strip().lower() in {"succeeded", "complete", "completed"} or prepare.get("completed"):
+            self._set_initial_setup_progress(100, "Initial setup fully completed host preparation.")
+            self._set_status("Initial setup completed. This machine is ready for local Doplets.", 7000)
         elif prepare.get("skipped"):
             self._set_initial_setup_progress(100, "Initial setup confirmed the local runtime is ready.")
             self._set_status("Initial setup checked this machine and skipped host preparation because the local runtime already looks ready.", 7000)

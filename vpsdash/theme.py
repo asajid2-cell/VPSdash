@@ -259,6 +259,35 @@ QTextBrowser:focus {
     border: 1px solid rgba(189, 194, 255, 0.45);
 }
 
+QProgressBar {
+    background-color: rgba(255, 255, 255, 0.03);
+    color: #eef0ff;
+    border: 1px solid rgba(112, 118, 156, 0.3);
+    border-radius: 12px;
+    min-height: 26px;
+    padding: 2px;
+    text-align: center;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+QProgressBar::chunk {
+    border-radius: 9px;
+    background-color: #2e3aa2;
+    margin: 1px;
+}
+
+#InitialSetupProgress {
+    background-color: #0f1012;
+    border-color: rgba(189, 194, 255, 0.2);
+    color: #f4f6ff;
+    min-height: 30px;
+}
+
+#InitialSetupProgress::chunk {
+    background-color: #3b49c2;
+}
+
 QLineEdit:disabled,
 QComboBox:disabled,
 QPlainTextEdit:disabled,
