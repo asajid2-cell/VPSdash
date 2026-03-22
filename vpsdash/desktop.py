@@ -1304,7 +1304,7 @@ class VpsDashWindow(QMainWindow):
         self.native_doplet_bootstrap_password = QLineEdit()
         self.native_doplet_bootstrap_password.setText("bypass")
         self.native_doplet_bootstrap_password.setPlaceholderText("Default sudo password is bypass")
-        self.native_doplet_bootstrap_password.setEchoMode(QLineEdit.Password)
+        self.native_doplet_bootstrap_password.setEchoMode(QLineEdit.Normal)
         self.native_doplet_keys = QPlainTextEdit()
         self.native_doplet_keys.setPlaceholderText("One public SSH key per line")
         self.native_doplet_keys.setFixedHeight(112)
@@ -3436,6 +3436,10 @@ class VpsDashWindow(QMainWindow):
         keys = [line.strip() for line in self.native_doplet_keys.toPlainText().splitlines() if line.strip()] if include_keys else []
         bootstrap_password = self.native_doplet_bootstrap_password.text().strip() or "bypass"
         metadata_json: dict[str, Any] = {"auth_mode": auth_mode}
+        existing = next(
+            (item for item in self._control_plane_doplets() if _coerce_int(item.get("id")) == _coerce_int(self.current_native_doplet_id)),
+            None,
+        )
         local_private_key_path = self._matching_local_private_key_path(keys)
         if local_private_key_path:
             metadata_json["local_private_key_path"] = local_private_key_path
@@ -3455,7 +3459,7 @@ class VpsDashWindow(QMainWindow):
             "bootstrap_password": bootstrap_password,
             "ssh_public_keys": keys,
             "metadata_json": metadata_json,
-            "status": "draft",
+            "status": str((existing or {}).get("status") or "draft"),
         }
         if payload["primary_network_id"] in {"", None}:
             payload.pop("primary_network_id")
@@ -3481,6 +3485,8 @@ class VpsDashWindow(QMainWindow):
         stored = str(metadata.get("auth_mode") or "").strip()
         if stored in {"password", "ssh", "password+ssh"}:
             return stored
+        if str(doplet.get("bootstrap_password") or "").strip() and not (doplet.get("ssh_public_keys") or []):
+            return "password"
         has_password = bool(str(doplet.get("bootstrap_password") or "").strip())
         has_keys = bool(doplet.get("ssh_public_keys") or [])
         if has_password and has_keys:
@@ -5223,12 +5229,15 @@ class VpsDashWindow(QMainWindow):
     def _save_host(self) -> None:
         self._form_refresh_timer.stop()
         try:
-            response = self.service.upsert_host(self._collect_host())
-            self.current_host = response["host"]
-            self.hosts = response["state"]["hosts"]
+            host_payload = self._collect_host()
+            legacy_response = self.service.upsert_host(host_payload)
+            platform_host = self.service.upsert_platform_host(host_payload, actor="desktop")
+            self.current_host = legacy_response["host"]
+            self.hosts = legacy_response["state"]["hosts"]
             self._populate_hosts()
+            self._load_bootstrap()
             self._refresh_dashboard()
-            self._set_status(f"Saved host {self.current_host['name']}", 4000)
+            self._set_status(f"Saved host {platform_host.get('name') or self.current_host['name']}", 4000)
         except Exception as exc:
             self._show_error("Save host failed", str(exc), traceback.format_exc())
 
