@@ -434,6 +434,29 @@ def inspect_host_domains(host: dict[str, Any]) -> list[dict[str, Any]]:
     return domains
 
 
+def reclaim_windows_local_runtime(host: dict[str, Any], *, timeout: int = 45) -> dict[str, Any]:
+    if not is_windows_local_mode(host):
+        return {"ok": False, "skipped": True, "reason": "host is not windows-local"}
+    distro = str(host.get("wsl_distribution") or "Ubuntu").strip() or "Ubuntu"
+    cleanup_result = run_local_command(
+        build_wsl_command(host, "pkill -f /tmp/vpsdash-ssh-proxy || true; rm -rf /tmp/vpsdash-ssh-proxy || true"),
+        timeout=min(timeout, 20),
+    )
+    terminate_result = run_local_command(
+        subprocess.list2cmdline(["wsl.exe", "--terminate", distro]),
+        timeout=min(timeout, 20),
+    )
+    shutdown_result = run_local_command("wsl.exe --shutdown", timeout=timeout)
+    return {
+        "ok": bool(shutdown_result.get("ok")) or bool(terminate_result.get("ok")),
+        "reclaimed": bool(shutdown_result.get("ok")) or bool(terminate_result.get("ok")),
+        "cleanup": cleanup_result,
+        "terminate": terminate_result,
+        "shutdown": shutdown_result,
+        "distro": distro,
+    }
+
+
 def _windows_local_proxy_port(doplet: dict[str, Any]) -> int:
     metadata = dict(doplet.get("metadata_json") or {})
     access = dict(metadata.get("access") or {})

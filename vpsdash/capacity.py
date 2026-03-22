@@ -285,6 +285,13 @@ def capacity_summary(host: dict[str, Any], doplets: list[dict[str, Any]], *, res
 
 
 def can_allocate(capacity: dict[str, Any], request: dict[str, Any]) -> tuple[bool, list[str]]:
+    totals = capacity.get("totals") or {}
+    if (
+        int(totals.get("cpu_threads") or 0) <= 0
+        or int(totals.get("ram_mb") or 0) <= 0
+        or float(totals.get("disk_gb") or 0) <= 0
+    ):
+        return True, []
     remaining = capacity.get("remaining") or {}
     errors: list[str] = []
     if int(request.get("vcpu") or 0) > int(remaining.get("cpu_threads") or 0):

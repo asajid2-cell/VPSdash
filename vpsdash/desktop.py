@@ -1001,11 +1001,14 @@ class VpsDashWindow(QMainWindow):
         open_builder.clicked.connect(self._open_doplet_builder)
         capture_inventory = make_button("Refresh Capacity", "secondary")
         capture_inventory.clicked.connect(self._capture_selected_or_local_platform_host_inventory)
+        reclaim_runtime = make_button("Reclaim WSL Memory", "ghost")
+        reclaim_runtime.clicked.connect(self._reclaim_selected_or_local_platform_host_runtime)
         refresh_button = make_button("Refresh State", "ghost")
         refresh_button.clicked.connect(self._load_bootstrap)
-        self.task_buttons.extend([capture_inventory, refresh_button])
+        self.task_buttons.extend([capture_inventory, reclaim_runtime, refresh_button])
         header_actions.addWidget(open_builder)
         header_actions.addWidget(capture_inventory)
+        header_actions.addWidget(reclaim_runtime)
         header_actions.addWidget(refresh_button)
         header_actions.addStretch(1)
         header_layout.addLayout(header_actions)
@@ -1084,6 +1087,8 @@ class VpsDashWindow(QMainWindow):
         self.resources_reprovision_button.clicked.connect(self._reprovision_selected_resources_doplet)
         self.resources_shutdown_button = make_button("Shutdown", "ghost")
         self.resources_shutdown_button.clicked.connect(lambda: self._queue_resources_doplet_lifecycle("shutdown"))
+        self.resources_force_stop_button = make_button("Force Stop", "ghost")
+        self.resources_force_stop_button.clicked.connect(lambda: self._queue_resources_doplet_lifecycle("force-stop"))
         self.resources_delete_button = make_button("Delete VPS", "ghost")
         self.resources_delete_button.clicked.connect(self._delete_selected_resources_doplet)
         self.task_buttons.extend(
@@ -1096,6 +1101,7 @@ class VpsDashWindow(QMainWindow):
                 self.resources_resize_button,
                 self.resources_reprovision_button,
                 self.resources_shutdown_button,
+                self.resources_force_stop_button,
                 self.resources_delete_button,
             ]
         )
@@ -1107,6 +1113,7 @@ class VpsDashWindow(QMainWindow):
         local_actions.addWidget(self.resources_resize_button)
         local_actions.addWidget(self.resources_reprovision_button)
         local_actions.addWidget(self.resources_shutdown_button)
+        local_actions.addWidget(self.resources_force_stop_button)
         local_actions.addWidget(self.resources_delete_button)
         local_actions.addStretch(1)
         local_vps_layout.addLayout(local_actions)
@@ -2011,9 +2018,12 @@ class VpsDashWindow(QMainWindow):
         self.native_capture_inventory_button.clicked.connect(self._capture_selected_platform_host_inventory)
         self.native_prepare_host_button = make_button("Prepare Host", "ghost")
         self.native_prepare_host_button.clicked.connect(self._prepare_selected_platform_host)
-        self.task_buttons.extend([self.native_capture_inventory_button, self.native_prepare_host_button])
+        self.native_reclaim_runtime_button = make_button("Reclaim WSL Memory", "ghost")
+        self.native_reclaim_runtime_button.clicked.connect(self._reclaim_selected_platform_host_runtime)
+        self.task_buttons.extend([self.native_capture_inventory_button, self.native_prepare_host_button, self.native_reclaim_runtime_button])
         host_actions.addWidget(self.native_capture_inventory_button)
         host_actions.addWidget(self.native_prepare_host_button)
+        host_actions.addWidget(self.native_reclaim_runtime_button)
         host_actions.addStretch(1)
         native_hosts_layout.addLayout(host_actions)
 
@@ -2060,6 +2070,8 @@ class VpsDashWindow(QMainWindow):
         self.native_manage_reprovision_button.clicked.connect(self._reprovision_selected_native_doplet)
         self.native_manage_shutdown_button = make_button("Shutdown", "ghost")
         self.native_manage_shutdown_button.clicked.connect(lambda: self._queue_native_doplet_lifecycle("shutdown"))
+        self.native_manage_force_stop_button = make_button("Force Stop", "ghost")
+        self.native_manage_force_stop_button.clicked.connect(lambda: self._queue_native_doplet_lifecycle("force-stop"))
         self.native_manage_delete_button = make_button("Delete VPS", "ghost")
         self.native_manage_delete_button.clicked.connect(self._delete_selected_native_doplet)
         self.task_buttons.extend(
@@ -2072,6 +2084,7 @@ class VpsDashWindow(QMainWindow):
                 self.native_manage_resize_button,
                 self.native_manage_reprovision_button,
                 self.native_manage_shutdown_button,
+                self.native_manage_force_stop_button,
                 self.native_manage_delete_button,
             ]
         )
@@ -2083,6 +2096,7 @@ class VpsDashWindow(QMainWindow):
         doplet_actions.addWidget(self.native_manage_resize_button)
         doplet_actions.addWidget(self.native_manage_reprovision_button)
         doplet_actions.addWidget(self.native_manage_shutdown_button)
+        doplet_actions.addWidget(self.native_manage_force_stop_button)
         doplet_actions.addWidget(self.native_manage_delete_button)
         doplet_actions.addStretch(1)
         native_doplets_layout.addLayout(doplet_actions)
@@ -3775,6 +3789,22 @@ class VpsDashWindow(QMainWindow):
             done_message="Inventory captured",
         )
 
+    def _reclaim_selected_or_local_platform_host_runtime(self) -> None:
+        host_id = self._selected_platform_host_id()
+        if not host_id:
+            local_hosts = self._local_control_plane_hosts()
+            host_id = int(local_hosts[0].get("id", 0)) if local_hosts else None
+        if not host_id:
+            self._set_status("No local host is configured yet", 3000)
+            return
+        self._run_async_task(
+            start_message=f"Reclaiming WSL runtime for host {host_id}...",
+            work=lambda: self.service.reclaim_platform_host_runtime(host_id, actor="desktop"),
+            on_success=lambda _result: self._load_bootstrap(),
+            error_title="Reclaim WSL memory failed",
+            done_message="Requested WSL runtime reclaim",
+        )
+
     def _queue_native_doplet_lifecycle(self, action: str) -> None:
         doplet_id = self._selected_native_doplet_id()
         if not doplet_id:
@@ -3935,6 +3965,19 @@ class VpsDashWindow(QMainWindow):
             on_success=lambda result: (self._watch_platform_task(int((result or {}).get("task_id", 0))), self._load_bootstrap()),
             error_title="Prepare host failed",
             done_message="Host preparation started",
+        )
+
+    def _reclaim_selected_platform_host_runtime(self) -> None:
+        host_id = self._selected_platform_host_id()
+        if not host_id:
+            self._set_status("Choose a host first", 3000)
+            return
+        self._run_async_task(
+            start_message=f"Reclaiming WSL runtime for host {host_id}...",
+            work=lambda: self.service.reclaim_platform_host_runtime(host_id, actor="desktop"),
+            on_success=lambda _result: self._load_bootstrap(),
+            error_title="Reclaim WSL memory failed",
+            done_message="Requested WSL runtime reclaim",
         )
 
     def _selected_native_task_id(self) -> int | None:

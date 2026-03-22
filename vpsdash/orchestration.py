@@ -660,9 +660,24 @@ def doplet_create_plan(host: dict[str, Any], doplet: dict[str, Any], image: dict
 
 
 def doplet_lifecycle_plan(host: dict[str, Any], slug: str, action: str) -> list[dict[str, Any]]:
+    shutdown_command = (
+        f"virsh shutdown {slug} >/dev/null 2>&1 || true; "
+        f"for i in $(seq 1 18); do "
+        f"state=$(virsh domstate {slug} 2>/dev/null || true); "
+        f"case \"$state\" in *\"shut off\"*|*\"shutoff\"*|\"\") exit 0 ;; esac; "
+        f"sleep 5; "
+        f"done; "
+        f"virsh destroy {slug} >/dev/null 2>&1 || true; "
+        f"for i in $(seq 1 10); do "
+        f"state=$(virsh domstate {slug} 2>/dev/null || true); "
+        f"case \"$state\" in *\"shut off\"*|*\"shutoff\"*|\"\") exit 0 ;; esac; "
+        f"sleep 2; "
+        f"done; "
+        f"echo 'Timed out waiting for Doplet to stop.' >&2; exit 1"
+    )
     actions = {
         "start": f"virsh start {slug}",
-        "shutdown": f"virsh shutdown {slug}",
+        "shutdown": shutdown_command,
         "reboot": f"virsh reboot {slug}",
         "force-stop": f"virsh destroy {slug}",
         "delete": f"virsh destroy {slug} || true && virsh undefine {slug} --remove-all-storage || true",

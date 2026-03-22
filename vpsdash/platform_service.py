@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import json
 import shutil
 import threading
 import time
@@ -16,7 +17,14 @@ from sqlalchemy.orm import Session
 from .capacity import can_allocate, capacity_summary, gpu_assignment_preflight, summarize_inventory
 from .config import PlatformConfig, load_config
 from .database import apply_schema_migrations, create_platform_engine, create_session_factory, session_scope
-from .execution import PlanCancelled, describe_doplet_terminal, inspect_doplet_runtime, inspect_host_domains, open_doplet_terminal
+from .execution import (
+    PlanCancelled,
+    describe_doplet_terminal,
+    inspect_doplet_runtime,
+    inspect_host_domains,
+    open_doplet_terminal,
+    reclaim_windows_local_runtime,
+)
 from .host_agent import HostAgent
 from .mailer import Mailer
 from .models import (
@@ -758,6 +766,41 @@ class PlatformService:
             doplets = [self._doplet_payload(item) for item in session.scalars(select(Doplet).where(Doplet.host_id == host.id)).all()]
             return self._host_payload_with_capacity(session, host, doplets)
 
+    def _ensure_host_capacity(self, session: Session, host: HostNode, *, actor: str) -> dict[str, Any]:
+        host_payload = self._host_payload(host)
+        capacity = capacity_summary(host_payload, [])
+        totals = capacity.get("totals") or {}
+        if (
+            int(totals.get("cpu_threads") or 0) > 0
+            and int(totals.get("ram_mb") or 0) > 0
+            and float(totals.get("disk_gb") or 0) > 0
+        ):
+            return host_payload
+        try:
+            snapshot = self.agent.capture_inventory(host_payload)
+        except Exception as exc:
+            inventory = dict(host.inventory or {})
+            inventory["capacity_probe_error"] = str(exc)
+            inventory["capacity_probe_error_at"] = security_now().isoformat()
+            host.inventory = inventory
+            session.flush()
+            return self._host_payload(host)
+        inventory = dict(host.inventory or {})
+        inventory["snapshot"] = snapshot
+        inventory["resources"] = summarize_inventory(snapshot)
+        inventory["captured_at"] = security_now().isoformat()
+        host.inventory = inventory
+        session.flush()
+        self._audit(
+            session,
+            actor=actor,
+            action="host.inventory_capture",
+            target_type="host",
+            target_id=str(host.id),
+            summary=f"Auto-captured inventory for {host.name}",
+        )
+        return self._host_payload(host)
+
     def queue_prepare_host(self, host_id: int, *, actor: str = "system") -> dict[str, Any]:
         with session_scope(self.session_factory) as session:
             host = session.get(HostNode, host_id)
@@ -892,6 +935,7 @@ class PlatformService:
             host = session.get(HostNode, requested_host_id)
             if not host:
                 raise KeyError(f"Unknown host: {requested_host_id}")
+            host_payload = self._ensure_host_capacity(session, host, actor=actor)
 
             requested_vcpu = int(payload.get("vcpu") or (flavor.vcpu if flavor else doplet.vcpu or 1))
             requested_ram_mb = int(payload.get("ram_mb") or (flavor.ram_mb if flavor else doplet.ram_mb or 1024))
@@ -904,20 +948,18 @@ class PlatformService:
                 for item in peer_records
                 if doplet.id is None or item.id != doplet.id
             ]
-            host_payload = self._host_payload(host)
             capacity = capacity_summary(host_payload, peer_payloads)
-            if any(capacity.get("totals", {}).values()):
-                okay, errors = can_allocate(
-                    capacity,
-                    {
-                        "vcpu": requested_vcpu,
-                        "ram_mb": requested_ram_mb,
-                        "disk_gb": requested_disk_gb,
-                        "gpu_assignments": requested_gpu_assignments,
-                    },
-                )
-                if not okay:
-                    raise ValueError(" ".join(errors))
+            okay, errors = can_allocate(
+                capacity,
+                {
+                    "vcpu": requested_vcpu,
+                    "ram_mb": requested_ram_mb,
+                    "disk_gb": requested_disk_gb,
+                    "gpu_assignments": requested_gpu_assignments,
+                },
+            )
+            if not okay:
+                raise ValueError(" ".join(errors))
             gpu_preflight = gpu_assignment_preflight(host_payload, requested_gpu_assignments)
             if not gpu_preflight["ok"]:
                 raise ValueError(" ".join(gpu_preflight["errors"]))
@@ -1016,6 +1058,12 @@ class PlatformService:
             )
             task.result_payload = self._task_security_payload(task.task_type, task.target_type, task.target_id, task.command_plan or [])
             session.add(task)
+            if action in {"shutdown", "force-stop"}:
+                doplet.status = "stopping"
+            elif action == "delete":
+                doplet.status = "deleting"
+            elif action == "start":
+                doplet.status = "starting"
             session.flush()
             self._audit(session, actor=actor, action="task.queue", target_type="task", target_id=str(task.id), summary=f"Queued {action} for {doplet.name}")
             return self._task_payload(task)
@@ -1630,6 +1678,53 @@ class PlatformService:
                 )
             return {"host": self._host_payload_with_capacity(session, host, doplets), "checks": checks, "ok": all(item["ok"] for item in checks)}
 
+    def reclaim_host_runtime(self, host_id: int, *, actor: str = "system") -> dict[str, Any]:
+        with session_scope(self.session_factory) as session:
+            host = session.get(HostNode, host_id)
+            if not host:
+                raise KeyError(f"Unknown host: {host_id}")
+            host_payload = self._host_payload(host)
+            result = self._maybe_reclaim_windows_local_runtime(host_payload, task_type="manual-reclaim")
+            inventory = dict(host.inventory or {})
+            inventory["last_runtime_reclaim"] = {
+                **result,
+                "requested_at": self._now().isoformat(),
+            }
+            host.inventory = inventory
+            self._audit(
+                session,
+                actor=actor,
+                action="host.runtime_reclaim",
+                target_type="host",
+                target_id=str(host.id),
+                summary=f"Requested runtime reclaim for {host.name}",
+                details=result,
+            )
+            doplets = [self._doplet_payload(item) for item in session.scalars(select(Doplet).where(Doplet.host_id == host.id)).all()]
+            return {"host": self._host_payload_with_capacity(session, host, doplets), "result": result}
+
+    def _maybe_reclaim_windows_local_runtime(self, host_payload: dict[str, Any], *, task_type: str) -> dict[str, Any]:
+        host_mode = str(host_payload.get("host_mode") or host_payload.get("mode") or "").strip().lower()
+        if host_mode not in {"windows-local", "windows-wsl-local"}:
+            return {"attempted": False, "reason": "host is not windows-local"}
+        if task_type not in {"doplet-shutdown", "doplet-force-stop", "doplet-delete", "manual-reclaim"}:
+            return {"attempted": False, "reason": "task type does not need reclaim"}
+        domains = inspect_host_domains(host_payload)
+        active = [
+            item
+            for item in domains
+            if str(item.get("status") or "").strip().lower() in {"running", "paused"}
+        ]
+        if active:
+            return {
+                "attempted": False,
+                "reason": "other local Doplets are still active",
+                "active_domains": [str(item.get("slug") or "").strip() for item in active if str(item.get("slug") or "").strip()],
+            }
+        reclaim = reclaim_windows_local_runtime(host_payload)
+        reclaim["attempted"] = True
+        return reclaim
+
     def run_task(self, task_id: int, *, actor: str = "system", dry_run: bool = False) -> dict[str, Any]:
         cancel_event = threading.Event()
         with self._task_lock:
@@ -1742,6 +1837,7 @@ class PlatformService:
                 self._task_cancel_events.pop(task_id, None)
         ok = all(item.get("ok", False) for item in results) if results else True
         uploads: list[dict[str, Any]] = []
+        cleanup_payload: dict[str, Any] = {}
 
         with session_scope(self.session_factory) as session:
             task = session.get(TaskRecord, task_id)
@@ -1750,6 +1846,11 @@ class PlatformService:
 
             if task.task_type == "backup-doplet" and ok and not dry_run:
                 uploads = self._finalize_backup_task(session, task, host_payload)
+            if ok and not dry_run and task.target_type == "doplet":
+                try:
+                    cleanup_payload = self._maybe_reclaim_windows_local_runtime(host_payload, task_type=task.task_type)
+                except Exception as exc:
+                    cleanup_payload = {"attempted": True, "reclaimed": False, "error": str(exc)}
 
             previous_payload = dict(task.result_payload or {})
             task.status = "succeeded" if ok else "failed"
@@ -1759,6 +1860,7 @@ class PlatformService:
                 "dry_run": dry_run,
                 "results": results,
                 "uploads": uploads,
+                "runtime_cleanup": cleanup_payload,
             }
             task.log_output = "\n\n".join(
                 [
@@ -1774,6 +1876,15 @@ class PlatformService:
                     for item in results
                 ]
             )
+            if cleanup_payload:
+                task.log_output = "\n\n".join(
+                    part
+                    for part in [
+                        task.log_output,
+                        f"[runtime cleanup]\n{json.dumps(cleanup_payload, indent=2, sort_keys=True)}",
+                    ]
+                    if part
+                )
             if not dry_run:
                 self._apply_task_side_effects(session, task, ok)
             self._audit(

@@ -430,6 +430,9 @@ class VpsDashService:
     def queue_prepare_platform_host(self, host_id: int, *, actor: str = "system") -> dict[str, Any]:
         return self.platform.queue_prepare_host(host_id, actor=actor)
 
+    def reclaim_platform_host_runtime(self, host_id: int, *, actor: str = "system") -> dict[str, Any]:
+        return self.platform.reclaim_host_runtime(host_id, actor=actor)
+
     def upsert_network(self, payload: dict, *, actor: str = "system") -> dict[str, Any]:
         return self.platform.upsert_network(payload, actor=actor)
 
