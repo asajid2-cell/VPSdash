@@ -248,9 +248,10 @@ class AutoHeightButton(QPushButton):
     def __init__(self, text: str, preferred_height: int, parent: QWidget | None = None) -> None:
         super().__init__(text, parent)
         self._preferred_height = preferred_height
+        self.setMinimumWidth(0)
         self.setMinimumHeight(preferred_height)
         self.setMaximumHeight(preferred_height)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
 
     def sizeHint(self) -> Any:
         hint = super().sizeHint()
@@ -607,6 +608,8 @@ class VpsDashWindow(QMainWindow):
         self._layout_audit_timer.timeout.connect(self._run_layout_audit)
         self._last_layout_issues: list[str] = []
         self._error_events: list[str] = []
+        self._native_size_override = False
+        self._native_size_fill_suspended = False
         self._bootstrap_poll_inflight = False
         self._watched_task_roots: set[int] = set()
         self._auto_retry_attempts: dict[int, int] = {}
@@ -1423,6 +1426,9 @@ class VpsDashWindow(QMainWindow):
         self.native_doplet_disk = QSpinBox()
         self.native_doplet_disk.setRange(4, 4096)
         self.native_doplet_disk.setValue(20)
+        self.native_doplet_vcpu.valueChanged.connect(self._native_size_changed_by_user)
+        self.native_doplet_ram.valueChanged.connect(self._native_size_changed_by_user)
+        self.native_doplet_disk.valueChanged.connect(self._native_size_changed_by_user)
         self.native_doplet_storage = QComboBox()
         self.native_doplet_storage.addItem("Files / qcow2", "files")
         self.native_doplet_storage.addItem("ZFS", "zfs")
@@ -2801,6 +2807,48 @@ class VpsDashWindow(QMainWindow):
                 return host
         return None
 
+    def _setup_blocker_detail(self, host_payload: dict[str, Any] | None) -> dict[str, str]:
+        host_payload = dict(host_payload or {})
+        setup_state = self._host_setup_state(host_payload)
+        steps = dict(setup_state.get("steps") or {})
+        current_step = str(setup_state.get("current_step") or "").strip()
+        current = dict(steps.get(current_step) or {})
+        combined = " ".join(
+            str(value or "").strip()
+            for value in (
+                setup_state.get("last_error"),
+                current.get("summary"),
+                current.get("details"),
+                current.get("status_output"),
+                current.get("stdout"),
+                current.get("stderr"),
+                current.get("list_output"),
+            )
+            if str(value or "").strip()
+        )
+        lowered = combined.lower()
+        if "hcs_e_hyperv_not_installed" in lowered or "virtual machine platform" in lowered or "enablevirtualization" in lowered:
+            return {
+                "summary": "Windows virtualization support is not fully enabled for WSL2 yet.",
+                "detail": "Enable BIOS virtualization and the Windows virtualization features, reboot, then rerun Initial Setup.",
+            }
+        if "no installed distributions" in lowered or "has no installed distributions" in lowered:
+            return {
+                "summary": "WSL is installed, but the Ubuntu distro is not initialized yet.",
+                "detail": "Run `wsl --install -d Ubuntu` if needed, then open Ubuntu once and complete the first-time user setup.",
+            }
+        if "system has not been booted with systemd" in lowered or "systemctl" in lowered and "not been booted" in lowered:
+            return {
+                "summary": "Ubuntu is up, but systemd is not enabled inside WSL.",
+                "detail": "Enable systemd in `/etc/wsl.conf`, run `wsl --shutdown`, reopen Ubuntu, then rerun Initial Setup.",
+            }
+        if "libvirtd" in lowered and ("failed" in lowered or "not found" in lowered or "could not" in lowered):
+            return {
+                "summary": "The libvirt service did not start successfully inside Ubuntu.",
+                "detail": "Open Ubuntu and check `systemctl status libvirtd` and `virsh uri`, then rerun Initial Setup.",
+            }
+        return {"summary": "", "detail": ""}
+
     def _setup_progress_snapshot(self, host_payload: dict[str, Any] | None) -> tuple[int, str, str]:
         if not host_payload:
             return 0, "Initial setup has not run yet.", "No local host setup state is recorded yet."
@@ -2828,12 +2876,14 @@ class VpsDashWindow(QMainWindow):
         if overall_status == "ready" or self._host_is_ready_for_doplets(host_payload):
             return 100, "Initial setup completed. This machine is ready for Doplets.", "Local host inventory and runtime preparation completed."
         if overall_status == "pending":
+            blocker = self._setup_blocker_detail(host_payload)
             if requires_reboot:
-                return max(percent, 60), "Waiting for Windows reboot to finish WSL setup.", current_summary or "WSL installation has started and Windows needs to finish applying it."
-            return max(percent, 60), "Waiting for WSL to finish provisioning on this machine.", current_summary or "WSL was installed or initialized, but the selected distro is not ready yet."
+                return max(percent, 60), blocker["summary"] or "Waiting for Windows reboot to finish WSL setup.", blocker["detail"] or current_summary or "WSL installation has started and Windows needs to finish applying it."
+            return max(percent, 60), blocker["summary"] or "Waiting for WSL to finish provisioning on this machine.", blocker["detail"] or current_summary or "WSL was installed or initialized, but the selected distro is not ready yet."
         if overall_status == "failed":
+            blocker = self._setup_blocker_detail(host_payload)
             detail = str(setup_state.get("last_error") or current_summary or "Initial setup failed.")
-            return max(percent, 5), self._summarize_status_message(f"Initial setup failed: {detail}"), detail
+            return max(percent, 5), self._summarize_status_message(blocker["summary"] or f"Initial setup failed: {detail}"), blocker["detail"] or detail
         if current_summary:
             return max(percent, 5), current_summary, current_summary
         return max(percent, 0), "Initial setup has not run yet.", "No local host setup state is recorded yet."
@@ -2855,6 +2905,9 @@ class VpsDashWindow(QMainWindow):
         current_step = str(setup_state.get("current_step") or "").strip()
         current = dict(steps.get(current_step) or {})
         summary = str(current.get("summary") or "").strip()
+        blocker = self._setup_blocker_detail(host_payload)
+        if blocker["summary"]:
+            return f"{blocker['summary']} {blocker['detail']}".strip()
         if bool(setup_state.get("requires_reboot")):
             return "This host still needs Windows to reboot so WSL can finish installing. Reboot the machine, reopen VPSdash, then run Initial Setup again."
         if current_step == "wsl-prerequisites":
@@ -2885,6 +2938,11 @@ class VpsDashWindow(QMainWindow):
             lines.append("Windows reboot may still be required before setup can continue.")
         if setup_state.get("last_error"):
             lines.extend(["", "Last error:", str(setup_state.get("last_error"))])
+        blocker = self._setup_blocker_detail(host)
+        if blocker["summary"]:
+            lines.extend(["", "Detected blocker:", blocker["summary"]])
+            if blocker["detail"]:
+                lines.append(blocker["detail"])
         if steps:
             lines.append("")
             lines.append("Steps:")
@@ -3300,6 +3358,7 @@ class VpsDashWindow(QMainWindow):
                     self.current_machine_resources_body.setText(
                         f"<b>{_escape(local_host.get('name') or 'Current machine')}</b><br>"
                         f"{_escape(self._format_capacity_line(local_host))}<br><br>"
+                        f"<pre>{_escape(self._capacity_detail_text(local_host))}</pre><br>"
                         f"Active VPS count: {len(active_local)}"
                     )
                 else:
@@ -3375,8 +3434,8 @@ class VpsDashWindow(QMainWindow):
         capacity = dict(host.get("capacity") or {})
         totals = dict(capacity.get("totals") or {})
         remaining = dict(capacity.get("remaining") or {})
-        total_cpu = int(totals.get("vcpu") or 0)
-        remaining_cpu = int(remaining.get("vcpu") or 0)
+        total_cpu = int(totals.get("cpu_threads") or 0)
+        remaining_cpu = int(remaining.get("cpu_threads") or 0)
         total_ram = int(totals.get("ram_mb") or 0)
         remaining_ram = int(remaining.get("ram_mb") or 0)
         total_disk = float(totals.get("disk_gb") or 0)
@@ -3389,6 +3448,61 @@ class VpsDashWindow(QMainWindow):
             f"{used_ram}/{total_ram} MB RAM used | "
             f"{used_disk:.0f}/{total_disk:.0f} GB disk used"
         )
+
+    def _capacity_breakdown(self, host: dict[str, Any]) -> dict[str, Any]:
+        capacity = dict(host.get("capacity") or {})
+        totals = dict(capacity.get("totals") or {})
+        reserve = dict(capacity.get("reserve") or {})
+        allocated = dict(capacity.get("allocated") or {})
+        remaining = dict(capacity.get("remaining") or {})
+        remaining_by_policy = dict(capacity.get("remaining_by_policy") or {})
+        observed = dict(capacity.get("observed") or {})
+        return {
+            "cpu": {
+                "total": int(totals.get("cpu_threads") or 0),
+                "reserved": int(reserve.get("cpu_threads") or 0),
+                "allocated": int(allocated.get("cpu_threads") or 0),
+                "remaining": int(remaining.get("cpu_threads") or 0),
+            },
+            "ram": {
+                "total_mb": int(totals.get("ram_mb") or 0),
+                "available_mb": int(totals.get("ram_available_mb") or observed.get("ram_available_mb") or 0),
+                "reserved_mb": int(reserve.get("ram_mb") or 0),
+                "allocated_mb": int(allocated.get("ram_mb") or 0),
+                "remaining_mb": int(remaining.get("ram_mb") or 0),
+                "remaining_by_policy_mb": int(remaining_by_policy.get("ram_mb") or 0),
+                "runtime_headroom_mb": int(observed.get("runtime_ram_headroom_mb") or 0),
+            },
+            "disk": {
+                "total_gb": float(totals.get("disk_gb") or 0.0),
+                "reserved_gb": float(reserve.get("disk_gb") or 0.0),
+                "allocated_gb": float(allocated.get("disk_gb") or 0.0),
+                "remaining_gb": float(remaining.get("disk_gb") or 0.0),
+            },
+        }
+
+    def _capacity_detail_text(self, host: dict[str, Any]) -> str:
+        info = self._capacity_breakdown(host)
+        cpu = info["cpu"]
+        ram = info["ram"]
+        disk = info["disk"]
+        lines = [
+            f"CPU: total {cpu['total']} | reserved {cpu['reserved']} | allocated {cpu['allocated']} | remaining {cpu['remaining']}",
+            (
+                f"RAM: total {ram['total_mb']} MB | reserved {ram['reserved_mb']} MB | "
+                f"allocated {ram['allocated_mb']} MB | remaining {ram['remaining_mb']} MB"
+            ),
+            f"Disk: total {disk['total_gb']:.0f} GB | reserved {disk['reserved_gb']:.0f} GB | allocated {disk['allocated_gb']:.0f} GB | remaining {disk['remaining_gb']:.0f} GB",
+        ]
+        if ram["available_mb"] > 0:
+            lines.append(
+                f"Observed WSL RAM available right now: {ram['available_mb']} MB | runtime headroom after reserve: {ram['runtime_headroom_mb']} MB"
+            )
+        if ram["remaining_by_policy_mb"] and ram["remaining_by_policy_mb"] != ram["remaining_mb"]:
+            lines.append(
+                f"Policy remaining RAM before live-WSL headroom check: {ram['remaining_by_policy_mb']} MB"
+            )
+        return "\n".join(lines)
 
     def _control_plane_images(self) -> list[dict[str, Any]]:
         return list((self.bootstrap_data.get("control_plane", {}) if hasattr(self, "bootstrap_data") else {}).get("images", []))
@@ -3568,13 +3682,22 @@ class VpsDashWindow(QMainWindow):
         if index >= 0:
             self.native_doplet_storage.setCurrentIndex(index)
 
+    def _native_size_changed_by_user(self, *_args: Any) -> None:
+        if self._native_size_fill_suspended:
+            return
+        self._native_size_override = True
+
     def _native_flavor_changed(self, *_args: Any) -> None:
         flavor = next((item for item in self._control_plane_flavors() if int(item.get("id", 0)) == int(self.native_doplet_flavor.currentData() or 0)), None)
         if not flavor:
             return
+        if self._native_size_override:
+            return
+        self._native_size_fill_suspended = True
         self.native_doplet_vcpu.setValue(int(flavor.get("vcpu") or 1))
         self.native_doplet_ram.setValue(int(flavor.get("ram_mb") or 1024))
         self.native_doplet_disk.setValue(int(flavor.get("disk_gb") or 20))
+        self._native_size_fill_suspended = False
 
     def _native_auth_mode_changed(self, *_args: Any) -> None:
         auth_mode = str(self.native_doplet_auth_mode.currentData() or "ssh")
@@ -3614,6 +3737,7 @@ class VpsDashWindow(QMainWindow):
             "name": doplet.get("name"),
             "status": doplet.get("status"),
             "host": host.get("name"),
+            "host_capacity": self._capacity_breakdown(host) if host else {},
             "usage": {
                 "vcpu": doplet.get("vcpu"),
                 "ram_mb": doplet.get("ram_mb"),
@@ -3647,6 +3771,7 @@ class VpsDashWindow(QMainWindow):
             "mode": host.get("host_mode") or host.get("mode"),
             "status": host.get("status"),
             "capacity": host.get("capacity") or {},
+            "capacity_summary": self._capacity_detail_text(host),
             "storage_backend": host.get("primary_storage_backend"),
             "ssh_target": f"{host.get('ssh_user') or 'user'}@{host.get('ssh_host') or 'host'}:{host.get('ssh_port') or 22}",
         }
@@ -3670,6 +3795,7 @@ class VpsDashWindow(QMainWindow):
             "name": doplet.get("name"),
             "status": doplet.get("status"),
             "host": host.get("name"),
+            "host_capacity": self._capacity_breakdown(host) if host else {},
             "image": image.get("name"),
             "size": f"{doplet.get('vcpu', 0)} CPU / {doplet.get('ram_mb', 0)} MB / {doplet.get('disk_gb', 0)} GB",
             "network": doplet.get("primary_network_id"),
@@ -3693,6 +3819,8 @@ class VpsDashWindow(QMainWindow):
         self._fill_native_doplet_form(doplet)
 
     def _fill_native_doplet_form(self, doplet: dict[str, Any]) -> None:
+        self._native_size_fill_suspended = True
+        self._native_size_override = False
         self.native_doplet_name.setText(str(doplet.get("name") or ""))
         self.native_doplet_slug.setText(str(doplet.get("slug") or ""))
         for widget, value in (
@@ -3716,6 +3844,7 @@ class VpsDashWindow(QMainWindow):
             self.native_doplet_auth_mode.setCurrentIndex(auth_index)
         self.native_doplet_bootstrap_password.setText(bootstrap_password)
         self.native_doplet_keys.setPlainText("\n".join(doplet.get("ssh_public_keys") or []))
+        self._native_size_fill_suspended = False
         self._native_auth_mode_changed()
 
     def _collect_native_doplet_payload(self) -> dict[str, Any]:
@@ -4256,7 +4385,7 @@ class VpsDashWindow(QMainWindow):
         if selected_host and str(selected_host.get("host_mode") or selected_host.get("mode") or "").strip().lower() == "windows-local":
             wsl_state = self._windows_local_wsl_state(selected_host)
             if not wsl_state.get("distro_ready"):
-                self._set_status("WSL is not ready yet on this machine. Run Initial Setup first and finish any WSL install/reboot prompts.", 7000)
+                self._set_status(self._initial_setup_blocker_message(selected_host), 9000)
                 return
         self._run_async_task(
             start_message=f"Preparing host {host_id}...",
@@ -5078,11 +5207,9 @@ class VpsDashWindow(QMainWindow):
         self._load_bootstrap()
         self._open_host_admin()
         if prepare.get("pending"):
-            self._set_initial_setup_progress(
-                100,
-                "Initial setup started WSL provisioning. Reboot Windows if prompted, then reopen VPSdash and run Initial Setup again.",
-            )
-            self._set_status("Initial setup started WSL installation. Reboot Windows if required, then rerun Initial Setup.", 9000)
+            blocker = self._initial_setup_blocker_message(host)
+            self._set_initial_setup_progress(100, blocker)
+            self._set_status(blocker, 9000)
         elif str(prepare.get("status") or "").strip().lower() in {"succeeded", "complete", "completed"} or prepare.get("completed"):
             self._set_initial_setup_progress(100, "Initial setup fully completed host preparation.")
             self._set_status("Initial setup completed. This machine is ready for local Doplets.", 7000)

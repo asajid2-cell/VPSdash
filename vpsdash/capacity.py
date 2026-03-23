@@ -122,6 +122,7 @@ def summarize_inventory(snapshot: dict[str, Any]) -> dict[str, Any]:
     return {
         "cpu_threads_total": _parse_int(_stdout(snapshot, "cpu")),
         "ram_mb_total": _parse_int(_stdout(snapshot, "memory_mb")),
+        "ram_mb_available": _parse_int(_stdout(snapshot, "memory_available_mb")),
         "disk_total_bytes": disk_total_bytes,
         "disk_free_bytes": disk_free_bytes,
         "disk_total_gib": _bytes_to_gib(disk_total_bytes),
@@ -207,6 +208,7 @@ def capacity_summary(host: dict[str, Any], doplets: list[dict[str, Any]], *, res
 
     total_cpu = int(resources.get("cpu_threads_total") or 0)
     total_ram_mb = int(resources.get("ram_mb_total") or 0)
+    available_ram_mb = int(resources.get("ram_mb_available") or 0)
     total_disk_gb = float(resources.get("disk_total_gib") or 0.0)
     total_gpu = int(resources.get("gpu_device_count") or 0)
     total_mediated_profiles = {
@@ -233,6 +235,9 @@ def capacity_summary(host: dict[str, Any], doplets: list[dict[str, Any]], *, res
     usable_ram_mb = max(total_ram_mb - reserve_ram_mb, 0)
     usable_disk_gb = max(total_disk_gb - reserve_disk_gb, 0.0)
     usable_gpu = total_gpu
+    runtime_ram_headroom_mb = max(available_ram_mb - reserve_ram_mb, 0) if available_ram_mb > 0 else usable_ram_mb
+    remaining_ram_mb = max(usable_ram_mb - allocated_ram_mb, 0)
+    effective_remaining_ram_mb = min(remaining_ram_mb, runtime_ram_headroom_mb) if available_ram_mb > 0 else remaining_ram_mb
     remaining_mediated = {
         profile_id: max(total - allocated_mediated.get(profile_id, 0), 0)
         for profile_id, total in total_mediated_profiles.items()
@@ -242,6 +247,7 @@ def capacity_summary(host: dict[str, Any], doplets: list[dict[str, Any]], *, res
         "totals": {
             "cpu_threads": total_cpu,
             "ram_mb": total_ram_mb,
+            "ram_available_mb": available_ram_mb,
             "disk_gb": total_disk_gb,
             "gpu_devices": total_gpu,
             "mediated_profiles": total_mediated_profiles,
@@ -260,6 +266,10 @@ def capacity_summary(host: dict[str, Any], doplets: list[dict[str, Any]], *, res
             "gpu_devices": usable_gpu,
             "mediated_profiles": total_mediated_profiles,
         },
+        "observed": {
+            "ram_available_mb": available_ram_mb,
+            "runtime_ram_headroom_mb": runtime_ram_headroom_mb,
+        },
         "allocated": {
             "cpu_threads": allocated_cpu,
             "ram_mb": allocated_ram_mb,
@@ -269,14 +279,19 @@ def capacity_summary(host: dict[str, Any], doplets: list[dict[str, Any]], *, res
         },
         "remaining": {
             "cpu_threads": max(usable_cpu - allocated_cpu, 0),
-            "ram_mb": max(usable_ram_mb - allocated_ram_mb, 0),
+            "ram_mb": effective_remaining_ram_mb,
             "disk_gb": round(max(usable_disk_gb - allocated_disk_gb, 0.0), 2),
             "gpu_devices": max(usable_gpu - allocated_gpu, 0),
             "mediated_profiles": remaining_mediated,
         },
+        "remaining_by_policy": {
+            "cpu_threads": max(usable_cpu - allocated_cpu, 0),
+            "ram_mb": remaining_ram_mb,
+            "disk_gb": round(max(usable_disk_gb - allocated_disk_gb, 0.0), 2),
+        },
         "overcommitted": {
             "cpu_threads": allocated_cpu > usable_cpu,
-            "ram_mb": allocated_ram_mb > usable_ram_mb,
+            "ram_mb": allocated_ram_mb > usable_ram_mb or (available_ram_mb > 0 and allocated_ram_mb > runtime_ram_headroom_mb),
             "disk_gb": allocated_disk_gb > usable_disk_gb,
             "gpu_devices": allocated_gpu > usable_gpu,
             "mediated_profiles": any(allocated_mediated.get(profile_id, 0) > total for profile_id, total in total_mediated_profiles.items()),
@@ -293,11 +308,18 @@ def can_allocate(capacity: dict[str, Any], request: dict[str, Any]) -> tuple[boo
     ):
         return True, []
     remaining = capacity.get("remaining") or {}
+    observed = capacity.get("observed") or {}
     errors: list[str] = []
     if int(request.get("vcpu") or 0) > int(remaining.get("cpu_threads") or 0):
         errors.append("Requested vCPU exceeds remaining CPU capacity.")
     if int(request.get("ram_mb") or 0) > int(remaining.get("ram_mb") or 0):
-        errors.append("Requested RAM exceeds remaining host memory.")
+        runtime_headroom = int(observed.get("runtime_ram_headroom_mb") or 0)
+        if runtime_headroom > 0:
+            errors.append(
+                f"Requested RAM exceeds remaining host memory. Runtime headroom is about {runtime_headroom} MB after host reserve."
+            )
+        else:
+            errors.append("Requested RAM exceeds remaining host memory.")
     if float(request.get("disk_gb") or 0) > float(remaining.get("disk_gb") or 0):
         errors.append("Requested disk exceeds remaining storage capacity.")
     physical_gpu_requests = 0

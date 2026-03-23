@@ -485,6 +485,7 @@ def inventory_snapshot(host: dict[str, Any]) -> dict[str, Any]:
     commands: dict[str, dict[str, Any]] = {
         "cpu": {"command": "nproc || getconf _NPROCESSORS_ONLN"},
         "memory_mb": {"command": "python3 - <<'PY'\nimport os\nprint(int(os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES') / 1024 / 1024))\nPY"},
+        "memory_available_mb": {"command": "python3 - <<'PY'\nimport re\nvalue = 0\nwith open('/proc/meminfo', 'r', encoding='utf-8') as handle:\n    for line in handle:\n        if line.startswith('MemAvailable:'):\n            match = re.search(r'(\\d+)', line)\n            if match:\n                value = int(match.group(1)) // 1024\n            break\nprint(value)\nPY"},
         "disk": {"command": "df -B1 --output=size,avail / | tail -n 1"},
         "libvirt": {"command": "virsh uri"},
         "gpu": {"command": "lspci -D | grep -Ei 'vga|3d|display' || true"},
