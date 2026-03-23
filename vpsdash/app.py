@@ -3,6 +3,7 @@
 import os
 import secrets
 import sys
+import logging
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
@@ -12,6 +13,7 @@ from werkzeug.exceptions import HTTPException
 from flask import Flask, abort, g, jsonify, redirect, render_template, request, send_from_directory, session, url_for
 
 from .authz import has_role
+from .logging_utils import configure_file_logging
 from .service import VpsDashService
 
 DEVICE_COOKIE_NAME = "vpsdash_device"
@@ -118,6 +120,7 @@ def _sensitive_action_guard() -> None:
 
 
 def create_app(root: Path | str | None = None, *, resource_root: Path | str | None = None) -> Flask:
+    runtime_log_path = configure_file_logging("web")
     state_root = Path(root) if root else _state_root()
     resource_root_path = Path(resource_root) if resource_root else _resource_root()
     static_dir = resource_root_path / "static"
@@ -131,6 +134,8 @@ def create_app(root: Path | str | None = None, *, resource_root: Path | str | No
         SESSION_COOKIE_SAMESITE="Lax",
         SESSION_COOKIE_SECURE=secure_cookie,
     )
+    app.logger.setLevel(logging.INFO)
+    app.logger.info("Web control plane created with log file at %s", runtime_log_path)
 
     def _web_bootstrap_data() -> dict[str, Any]:
         data = service.platform.bootstrap()

@@ -4,6 +4,7 @@ __pycache__/
 
 artifacts/
 data/
+logs/
 build/
 build_*/
 build_rebuilt/

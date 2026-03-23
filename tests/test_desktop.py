@@ -700,13 +700,55 @@ class DesktopTests(unittest.TestCase):
             window.service.queue_doplet_create = MagicMock(return_value={"id": 91, "status": "planned"})
             window.service.launch_platform_task = MagicMock(return_value={"id": 91, "status": "queued"})
             window._load_bootstrap = MagicMock()
-            window._run_async_task = lambda **kwargs: kwargs["on_success"](kwargs["work"]())
+            window._run_async_task = lambda **kwargs: kwargs["on_success"](kwargs["work"](lambda *_args: None))
 
             window._create_native_doplet()
 
             window.service.queue_doplet_create.assert_called_once_with(41, actor="desktop")
             window.service.launch_platform_task.assert_called_once_with(91, actor="desktop", dry_run=False)
             self.assertIn(91, window._watched_task_roots)
+        finally:
+            window.close()
+
+    def test_create_native_doplet_resumes_local_host_setup_before_queueing(self) -> None:
+        window = VpsDashWindow(VpsDashService(self.root))
+        try:
+            window.bootstrap_data = {
+                "control_plane": {
+                    "hosts": [
+                        {
+                            "id": 3,
+                            "name": "DESKTOP",
+                            "host_mode": "windows-local",
+                            "status": "queued",
+                            "inventory": {"resources": {"virtualization_ready": False}},
+                        }
+                    ]
+                }
+            }
+            window.service.upsert_doplet = MagicMock(return_value={"id": 41, "name": "Smoke Doplet", "host_id": 3})
+            window.service.queue_doplet_create = MagicMock(return_value={"id": 91, "status": "planned"})
+            window.service.launch_platform_task = MagicMock(return_value={"id": 91, "status": "queued"})
+            window._perform_local_initial_setup_with_progress = MagicMock(
+                return_value={
+                    "host": {
+                        "id": 3,
+                        "name": "DESKTOP",
+                        "host_mode": "windows-local",
+                        "status": "ready",
+                        "inventory": {"resources": {"virtualization_ready": True}},
+                    },
+                    "prepare": {"completed": True, "status": "completed"},
+                }
+            )
+            window._load_bootstrap = MagicMock()
+            window._run_async_task = lambda **kwargs: kwargs["on_success"](kwargs["work"](lambda *_args: None))
+
+            window._create_native_doplet()
+
+            window._perform_local_initial_setup_with_progress.assert_called_once()
+            window.service.queue_doplet_create.assert_called_once_with(41, actor="desktop")
+            window.service.launch_platform_task.assert_called_once_with(91, actor="desktop", dry_run=False)
         finally:
             window.close()
 

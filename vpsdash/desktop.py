@@ -4,6 +4,7 @@ import html
 import hashlib
 import inspect
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -58,11 +59,13 @@ _QWEBENGINE_IMPORT_ATTEMPTED = False
 from .service import VpsDashService
 from .theme import APP_QSS
 from .execution import run_local_command
+from .logging_utils import configure_file_logging, log_path
 
 
 ACTIVE_PLATFORM_TASK_STATUSES = {"planned", "queued", "running", "cancel-requested"}
 RETRYABLE_PLATFORM_TASK_STATUSES = {"failed", "cancelled"}
 ARCHIVED_PLATFORM_TASK_STATUSES = {"cancelled", "complete", "completed"}
+LOGGER = logging.getLogger("vpsdash.desktop")
 
 
 def _windows_subprocess_kwargs() -> dict[str, Any]:
@@ -141,11 +144,7 @@ def _state_root() -> Path:
 
 
 def _startup_log_path() -> Path:
-    if os.name == "nt":
-        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-    else:
-        base = Path.home() / ".local" / "state"
-    return base / "VPSdash" / "desktop-launch.log"
+    return log_path("desktop")
 
 
 def _app_icon_path() -> Path:
@@ -153,6 +152,12 @@ def _app_icon_path() -> Path:
 
 
 def _write_startup_log(message: str) -> None:
+    if logging.getLogger().handlers:
+        try:
+            LOGGER.info(message.rstrip())
+            return
+        except Exception:
+            pass
     try:
         path = _startup_log_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -457,6 +462,7 @@ class BackgroundTask(QRunnable):
             else:
                 result = self.fn()
         except Exception as exc:
+            LOGGER.exception("Background task failed")
             try:
                 self.signals.error.emit(str(exc), traceback.format_exc())
             except RuntimeError:
@@ -2510,6 +2516,7 @@ class VpsDashWindow(QMainWindow):
             self._set_status(done_message, 4000)
 
         def _error(message: str, details: str) -> None:
+            LOGGER.error("%s: %s\n%s", error_title, message, (details or "").strip())
             if on_progress is not None:
                 on_progress(0, f"{error_title}: inspect Activity for details.")
             self._show_error(error_title, message, details)
@@ -2724,6 +2731,20 @@ class VpsDashWindow(QMainWindow):
             raise ValueError("Queued task did not return a valid task id.")
         launched = self.service.launch_platform_task(task_id, actor=actor, dry_run=False)
         return {"queued": queued, "launched": launched, "task_id": task_id}
+
+    def _platform_host_by_id(self, host_id: int) -> dict[str, Any] | None:
+        if host_id <= 0:
+            return None
+        control_plane = (self.bootstrap_data.get("control_plane", {}) or {}) if hasattr(self, "bootstrap_data") else {}
+        for host in control_plane.get("hosts", []) or []:
+            if int(host.get("id", 0) or 0) == host_id:
+                return dict(host)
+        return None
+
+    def _host_is_ready_for_doplets(self, host_payload: dict[str, Any] | None) -> bool:
+        host_payload = dict(host_payload or {})
+        resources = ((host_payload.get("inventory") or {}).get("resources") or {})
+        return str(host_payload.get("status") or "").strip().lower() == "ready" or bool(resources.get("virtualization_ready"))
 
     def _retry_and_launch_platform_task(self, task_id: int, *, actor: str = "desktop") -> dict[str, Any]:
         queued = self.service.retry_platform_task(task_id, actor=actor)
@@ -3623,16 +3644,43 @@ class VpsDashWindow(QMainWindow):
             self.current_native_doplet_id = int(doplet.get("id", 0))
             self._run_async_task(
                 start_message=f"Creating Doplet {doplet.get('name', '')}...",
-                work=lambda: self._launch_queued_platform_task(
-                    lambda: self.service.queue_doplet_create(int(doplet["id"]), actor="desktop"),
-                    actor="desktop",
-                ),
+                work=lambda progress: self._create_native_doplet_task(doplet, progress),
                 on_success=lambda result: (self._watch_platform_task(int((result or {}).get("task_id", 0))), self._load_bootstrap()),
                 error_title="Create Doplet failed",
                 done_message="Doplet create started",
             )
         except Exception as exc:
             self._show_error("Create Doplet failed", str(exc), traceback.format_exc())
+
+    def _create_native_doplet_task(self, doplet: dict[str, Any], progress: Any) -> dict[str, Any]:
+        doplet_id = int(doplet.get("id", 0) or 0)
+        host_id = int(doplet.get("host_id", 0) or 0)
+        host = self._platform_host_by_id(host_id)
+        if host and not self._host_is_ready_for_doplets(host):
+            host_mode = str(host.get("host_mode") or host.get("mode") or "").strip().lower()
+            if host_mode in {"windows-local", "linux-local"}:
+                progress(12, f"Finishing setup for host {host.get('name', 'local host')}...")
+                setup_result = self._perform_local_initial_setup_with_progress(host, progress)
+                host = dict(setup_result.get("host") or host)
+                prepare = dict(setup_result.get("prepare") or {})
+                if prepare.get("pending"):
+                    raise RuntimeError(
+                        "This host still needs setup completion before it can create Doplets. "
+                        "If Windows or WSL requested a reboot or first-launch step, finish that and run Initial Setup again."
+                    )
+                if not self._host_is_ready_for_doplets(host):
+                    raise RuntimeError(
+                        "Initial Setup did not finish preparing this host. Open Host Admin and review Activity > Error console and logs."
+                    )
+            else:
+                raise RuntimeError(
+                    "This host is not prepared yet. Capture inventory and run Prepare Host before creating a Doplet."
+                )
+        progress(82, f"Queueing create for {doplet.get('name', 'Doplet')}...")
+        return self._launch_queued_platform_task(
+            lambda: self.service.queue_doplet_create(doplet_id, actor="desktop"),
+            actor="desktop",
+        )
 
     def _terminal_command_for_selected_native_doplet(self) -> str:
         doplet_id = self._selected_native_doplet_id()
@@ -4514,6 +4562,45 @@ class VpsDashWindow(QMainWindow):
             return compact[: limit - 3].rstrip() + "..."
         return compact
 
+    def _host_setup_state(self, host_payload: dict[str, Any] | None) -> dict[str, Any]:
+        payload = dict(host_payload or {})
+        inventory = dict(payload.get("inventory") or {})
+        config = dict(payload.get("config") or inventory.get("config") or {})
+        state = dict(config.get("setup_state") or {})
+        state["steps"] = dict(state.get("steps") or {})
+        return state
+
+    def _set_setup_step(self, setup_state: dict[str, Any], step: str, status: str, summary: str, **extra: Any) -> dict[str, Any]:
+        steps = dict(setup_state.get("steps") or {})
+        entry = {
+            "status": str(status or "").strip().lower() or "pending",
+            "summary": str(summary or "").strip(),
+            "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        for key, value in extra.items():
+            if value is not None and value != "" and value != [] and value != {}:
+                entry[key] = value
+        steps[step] = entry
+        setup_state["steps"] = steps
+        setup_state["current_step"] = step
+        return setup_state
+
+    def _persist_host_setup_state(
+        self,
+        host_payload: dict[str, Any],
+        setup_state: dict[str, Any],
+        *,
+        status: str | None = None,
+    ) -> dict[str, Any]:
+        payload = self._control_plane_host_payload(host_payload, status=status)
+        inventory = dict(payload.get("inventory") or {})
+        config = dict(payload.get("config") or inventory.get("config") or {})
+        config["setup_state"] = dict(setup_state or {})
+        inventory["config"] = config
+        payload["inventory"] = inventory
+        payload["config"] = config
+        return self.service.upsert_platform_host(payload, actor="desktop")
+
     def _run_initial_setup_step_with_retries(
         self,
         title: str,
@@ -4627,88 +4714,158 @@ class VpsDashWindow(QMainWindow):
         host_id = int(host.get("id", 0))
         if host_id <= 0:
             raise RuntimeError("Initial setup could not save the local host profile.")
-
-        if host_mode == "windows-local":
-            emit(38, "Checking Windows and WSL prerequisites...")
-            wsl_state = self._windows_local_wsl_state(host_payload)
-            result["setup"]["wsl"] = {
-                "distro": wsl_state["distro"],
-                "distro_exists": wsl_state["distro_exists"],
-                "distro_ready": wsl_state["distro_ready"],
-                "list_output": wsl_state["list_output"],
-                "list_ok": bool(((wsl_state or {}).get("list_result") or {}).get("ok")),
+        setup_state = self._host_setup_state(host)
+        setup_state.update(
+            {
+                "overall_status": "running",
+                "host_mode": host_mode,
+                "last_started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "last_error": "",
             }
-            if not wsl_state["distro_exists"] or not wsl_state["distro_ready"]:
-                emit(48, f"Installing or initializing WSL distro {wsl_state['distro']}...")
-                install_result = self._run_initial_setup_step_with_retries(
-                    f"Install or initialize WSL distro {wsl_state['distro']}",
-                    lambda: self._install_windows_local_wsl(host_payload),
-                    emit=emit,
-                    attempts=2,
-                    success_check=lambda value: bool((value or {}).get("ok")),
-                    error_detail=lambda value: (value or {}).get("stderr") or (value or {}).get("stdout") or "",
-                )
-                result["setup"]["wsl_install"] = {
-                    "ok": bool(install_result.get("ok")),
-                    "reboot_required": bool(install_result.get("reboot_required")),
-                    "stdout": str(install_result.get("stdout") or ""),
-                    "stderr": str(install_result.get("stderr") or ""),
-                }
-                emit(58, "Re-checking WSL runtime after install...")
-                follow_up = self._windows_local_wsl_state(host_payload)
-                result["setup"]["wsl"].update(
-                    {
-                        "distro_exists": follow_up["distro_exists"],
-                        "distro_ready": follow_up["distro_ready"],
-                        "list_output": follow_up["list_output"],
-                        "list_ok": bool(((follow_up or {}).get("list_result") or {}).get("ok")),
-                    }
-                )
-                if not follow_up["distro_ready"]:
-                    host = self.service.upsert_platform_host(
-                        self._control_plane_host_payload(host, status="queued"),
-                        actor="desktop",
-                    )
-                    result["host"] = host
-                    result["prepare"] = {
-                        "skipped": True,
-                        "pending": True,
-                        "reason": "wsl-not-ready",
-                        "reboot_required": bool(install_result.get("reboot_required")),
-                    }
-                    emit(
-                        100,
-                        "WSL setup started. Reopen VPSdash after WSL finishes installing"
-                        + (" and reboot Windows if prompted." if install_result.get("reboot_required") else "."),
-                    )
-                    return result
-
-        emit(62, "Capturing system inventory...")
-        inventory = self._run_initial_setup_step_with_retries(
-            "Capture system inventory",
-            lambda: self.service.capture_platform_host_inventory(host_id, actor="desktop"),
-            emit=emit,
         )
-        resources = dict((inventory.get("inventory") or {}).get("resources") or {})
-        if bool(resources.get("virtualization_ready")):
-            emit(100, "Local host is ready for Doplets.")
-            host = self.service.upsert_platform_host(
-                self._control_plane_host_payload(host, status="ready"),
-                actor="desktop",
-            )
-            prepare = {"skipped": True, "status": "ready"}
-        else:
-            emit(78, "Preparing the local hypervisor stack...")
-            host = self.service.upsert_platform_host(
-                self._control_plane_host_payload(host, status="provisioning"),
-                actor="desktop",
-            )
-            prepare = self._run_prepare_host_until_complete(host_id, emit)
-            emit(100, "Initial setup finished preparing the local host.")
+        self._set_setup_step(setup_state, "host-profile", "complete", "Saved the local host profile.")
+        host = self._persist_host_setup_state(host, setup_state, status="queued" if host_mode in {"windows-local", "linux-local"} else None)
         result["host"] = host
-        result["inventory"] = inventory
-        result["prepare"] = prepare
-        return result
+
+        try:
+            if source_state:
+                if source_state["needs_venv"] or source_state["needs_requirements"]:
+                    self._set_setup_step(
+                        setup_state,
+                        "python-environment",
+                        "complete",
+                        "Python runtime and dependencies were prepared.",
+                        venv_created=bool(source_state["needs_venv"]),
+                        requirements_installed=bool(source_state["needs_requirements"]),
+                    )
+                else:
+                    self._set_setup_step(
+                        setup_state,
+                        "python-environment",
+                        "skipped",
+                        "Python runtime and dependencies were already in place.",
+                    )
+                host = self._persist_host_setup_state(host, setup_state, status="queued" if host_mode in {"windows-local", "linux-local"} else None)
+
+            if host_mode == "windows-local":
+                emit(38, "Checking Windows and WSL prerequisites...")
+                wsl_state = self._windows_local_wsl_state(host_payload)
+                result["setup"]["wsl"] = {
+                    "distro": wsl_state["distro"],
+                    "distro_exists": wsl_state["distro_exists"],
+                    "distro_ready": wsl_state["distro_ready"],
+                    "list_output": wsl_state["list_output"],
+                    "list_ok": bool(((wsl_state or {}).get("list_result") or {}).get("ok")),
+                }
+                self._set_setup_step(
+                    setup_state,
+                    "wsl-prerequisites",
+                    "complete" if wsl_state["distro_ready"] else "pending",
+                    "WSL runtime is ready." if wsl_state["distro_ready"] else f"WSL runtime {wsl_state['distro']} still needs installation or initialization.",
+                    distro=wsl_state["distro"],
+                    list_ok=bool(((wsl_state or {}).get("list_result") or {}).get("ok")),
+                )
+                host = self._persist_host_setup_state(host, setup_state, status="queued")
+                if not wsl_state["distro_exists"] or not wsl_state["distro_ready"]:
+                    emit(48, f"Installing or initializing WSL distro {wsl_state['distro']}...")
+                    install_result = self._run_initial_setup_step_with_retries(
+                        f"Install or initialize WSL distro {wsl_state['distro']}",
+                        lambda: self._install_windows_local_wsl(host_payload),
+                        emit=emit,
+                        attempts=2,
+                        success_check=lambda value: bool((value or {}).get("ok")),
+                        error_detail=lambda value: (value or {}).get("stderr") or (value or {}).get("stdout") or "",
+                    )
+                    result["setup"]["wsl_install"] = {
+                        "ok": bool(install_result.get("ok")),
+                        "reboot_required": bool(install_result.get("reboot_required")),
+                        "stdout": str(install_result.get("stdout") or ""),
+                        "stderr": str(install_result.get("stderr") or ""),
+                    }
+                    self._set_setup_step(
+                        setup_state,
+                        "wsl-install",
+                        "complete",
+                        f"WSL install/init started for {wsl_state['distro']}.",
+                        reboot_required=bool(install_result.get("reboot_required")),
+                    )
+                    host = self._persist_host_setup_state(host, setup_state, status="queued")
+                    emit(58, "Re-checking WSL runtime after install...")
+                    follow_up = self._windows_local_wsl_state(host_payload)
+                    result["setup"]["wsl"].update(
+                        {
+                            "distro_exists": follow_up["distro_exists"],
+                            "distro_ready": follow_up["distro_ready"],
+                            "list_output": follow_up["list_output"],
+                            "list_ok": bool(((follow_up or {}).get("list_result") or {}).get("ok")),
+                        }
+                    )
+                    if not follow_up["distro_ready"]:
+                        setup_state["overall_status"] = "pending"
+                        setup_state["requires_reboot"] = bool(install_result.get("reboot_required"))
+                        setup_state["last_completed_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                        self._set_setup_step(
+                            setup_state,
+                            "wsl-prerequisites",
+                            "pending",
+                            "WSL was installed or updated, but Windows still needs to finish initializing it.",
+                            reboot_required=bool(install_result.get("reboot_required")),
+                        )
+                        host = self._persist_host_setup_state(host, setup_state, status="queued")
+                        result["host"] = host
+                        result["prepare"] = {
+                            "skipped": True,
+                            "pending": True,
+                            "reason": "wsl-not-ready",
+                            "reboot_required": bool(install_result.get("reboot_required")),
+                        }
+                        emit(
+                            100,
+                            "WSL setup started. Reopen VPSdash after WSL finishes installing"
+                            + (" and reboot Windows if prompted." if install_result.get("reboot_required") else "."),
+                        )
+                        return result
+
+            emit(62, "Capturing system inventory...")
+            inventory = self._run_initial_setup_step_with_retries(
+                "Capture system inventory",
+                lambda: self.service.capture_platform_host_inventory(host_id, actor="desktop"),
+                emit=emit,
+            )
+            self._set_setup_step(setup_state, "inventory", "complete", "Captured host inventory and capacity.")
+            resources = dict((inventory.get("inventory") or {}).get("resources") or {})
+            if bool(resources.get("virtualization_ready")):
+                emit(100, "Local host is ready for Doplets.")
+                self._set_setup_step(setup_state, "host-prepare", "skipped", "Host runtime already looked ready from inventory.")
+                setup_state["overall_status"] = "ready"
+                setup_state["requires_reboot"] = False
+                setup_state["last_completed_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                host = self._persist_host_setup_state(host, setup_state, status="ready")
+                prepare = {"skipped": True, "status": "ready"}
+            else:
+                emit(78, "Preparing the local hypervisor stack...")
+                self._set_setup_step(setup_state, "host-prepare", "running", "Preparing the local hypervisor stack.")
+                host = self._persist_host_setup_state(host, setup_state, status="provisioning")
+                prepare = self._run_prepare_host_until_complete(host_id, emit)
+                self._set_setup_step(setup_state, "host-prepare", "complete", "Local host preparation completed.")
+                setup_state["overall_status"] = "ready"
+                setup_state["requires_reboot"] = False
+                setup_state["last_completed_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                host = self._persist_host_setup_state(host, setup_state, status="ready")
+                emit(100, "Initial setup finished preparing the local host.")
+            result["host"] = host
+            result["inventory"] = inventory
+            result["prepare"] = prepare
+            return result
+        except Exception as exc:
+            setup_state["overall_status"] = "failed"
+            setup_state["last_error"] = str(exc)
+            setup_state["last_failed_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            try:
+                self._persist_host_setup_state(host, setup_state, status="queued" if host_mode in {"windows-local", "linux-local"} else None)
+            except Exception:
+                pass
+            raise
 
     def _run_initial_setup(self) -> None:
         machine = self.local_machine or {}
@@ -5941,6 +6098,7 @@ class VpsDashWindow(QMainWindow):
         console_entry = f"[{timestamp}] {title}\n{message}"
         if details:
             console_entry = f"{console_entry}\n\n{details.strip()}"
+        LOGGER.error("%s: %s\n%s", title, message, (details or "").strip())
         self._error_events.insert(0, console_entry)
         self._error_events = self._error_events[:30]
         self._refresh_error_console()
@@ -5983,6 +6141,7 @@ class VpsDashWindow(QMainWindow):
 
 
 def run_desktop_app() -> None:
+    runtime_log_path = configure_file_logging("desktop")
     _write_startup_log("Starting VPSdash desktop app")
     app = QApplication(sys.argv)
     icon_path = _app_icon_path()
@@ -5997,7 +6156,7 @@ def run_desktop_app() -> None:
     window = VpsDashWindow(service)
     if icon_path.exists():
         window.setWindowIcon(QIcon(str(icon_path)))
-    _write_startup_log("QApplication and main window created")
+    _write_startup_log(f"QApplication and main window created (log file: {runtime_log_path})")
 
     def _handle_uncaught_exception(exc_type: Any, exc_value: BaseException, exc_traceback: Any) -> None:
         if issubclass(exc_type, KeyboardInterrupt):
